@@ -6,6 +6,16 @@ import math
 import time
 import html
 
+# --- 核心修复：防止 PyInstaller --noconsole 模式下 transformers 报错 ---
+# 必须在导入 transformers 之前执行
+class NullWriter:
+    def write(self, text): pass
+    def flush(self): pass
+    def isatty(self): return False
+
+if sys.stdout is None: sys.stdout = NullWriter()
+if sys.stderr is None: sys.stderr = NullWriter()
+
 # --- 依赖库安全导入 ---
 try:
     import chardet
@@ -36,6 +46,32 @@ from PySide6.QtGui import (
     QTextCharFormat, QPen, QPolygonF, QBrush, QPalette, QIcon, QRadialGradient,
     QPainterPath, QPixmap, QTransform, QFontMetrics
 )
+
+# ---------------------- 路径处理辅助函数 (双重保障) ----------------------
+def get_resource_path(relative_path):
+    """
+    智能获取资源路径：
+    1. 优先检查程序运行目录
+    2. 其次检查 PyInstaller 内部临时目录
+    """
+    # 1. 检查 exe 所在目录 (外部目录)
+    if getattr(sys, 'frozen', False):
+        # 如果是打包后的 exe
+        base_path_external = os.path.dirname(sys.executable)
+    else:
+        # 如果是脚本运行
+        base_path_external = os.path.dirname(os.path.abspath(__file__))
+    
+    external_path = os.path.join(base_path_external, relative_path)
+    if os.path.exists(external_path):
+        return external_path
+
+    # 2. 检查内部目录 (_MEIPASS)
+    if hasattr(sys, '_MEIPASS'):
+        internal_path = os.path.join(sys._MEIPASS, relative_path)
+        return internal_path
+
+    return external_path # 默认返回外部路径，即使不存在
 
 # ---------------------- 核心配色与状态管理 ----------------------
 class Theme:
@@ -229,9 +265,6 @@ class AIGCGaugeWidget(QWidget):
 # ---------------------- 交互增强组件 ----------------------
 
 class DragTextEdit(QTextEdit):
-    """
-    具有吸附和发光动效的编辑器
-    """
     file_dropped = Signal(str)
     
     def __init__(self, parent=None):
@@ -294,13 +327,6 @@ class DragTextEdit(QTextEdit):
             p.drawPath(path)
 
 class ResultBlock(QWidget):
-    """
-    单个结果段落卡片 - 侧滑版
-    特性：
-    1. 无遮挡：移除了侧滑信息卡
-    2. 内联标签：AI率直接追加在文字末尾
-    3. 侧滑入场：从右侧平滑滑入
-    """
     def __init__(self, content, ai_rate, parent=None):
         super().__init__(parent)
         self.content = content
@@ -308,7 +334,6 @@ class ResultBlock(QWidget):
         self.setFixedHeight(0) # 初始高度0
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         
-        # 1. 颜色判定
         if ai_rate < 30: 
             self.accent_color = Theme.ACCENT_GREEN
             self.verdict = "人类创作"
@@ -319,28 +344,23 @@ class ResultBlock(QWidget):
             self.accent_color = Theme.ACCENT_RED
             self.verdict = "疑似生成"
 
-        # 2. 内部容器 (用于实现整体内容的位移动画)
-        # 我们不直接在 paintEvent 里移动 Painter，而是移动这个内部 Widget
         self.content_widget = QWidget(self)
         self.content_widget.move(100, 0) # 初始位置偏移
 
-        # 3. 布局
         self.layout = QVBoxLayout(self.content_widget)
         self.layout.setContentsMargins(15, 12, 15, 12)
         
-        # 文本标签 (RichText)
         self.text_label = QLabel("")
         self.text_label.setWordWrap(True)
         self.text_label.setStyleSheet(f"color: {Theme.get('text_sub')}; font-size: 11pt; line-height: 1.6;")
         self.text_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.text_label.setTextFormat(Qt.RichText) # 启用富文本
+        self.text_label.setTextFormat(Qt.RichText) 
         
         self.layout.addWidget(self.text_label)
 
-        # 4. 动画状态
         self._typewriter_idx = 0
         self._opacity = 0.0
-        self._slide_offset_x = 80.0 # 初始向右偏移 80px
+        self._slide_offset_x = 80.0 
 
         self.anim_entry = QPropertyAnimation(self, b"entry_val", self)
         self.anim_entry.setDuration(700)
@@ -348,8 +368,6 @@ class ResultBlock(QWidget):
         
         self.timer_type = QTimer(self)
         self.timer_type.setInterval(5) # 打字速度
-
-        # 连接打字机信号
         self.timer_type.timeout.connect(self._step_typewriter)
 
     @Property(float)
@@ -357,99 +375,75 @@ class ResultBlock(QWidget):
     @entry_val.setter
     def entry_val(self, v):
         self._opacity = v
-        # 动画逻辑：v 从 0 -> 1
-        # slide_offset 从 80 -> 0 (从右向左滑)
         self._slide_offset_x = 80.0 * (1.0 - v)
-        
-        # 更新内部容器位置
         self.content_widget.move(int(self._slide_offset_x), 0)
-        self.update() # 触发重绘更新透明度
+        self.update() 
 
     def start_reveal(self, delay=0):
         QTimer.singleShot(delay, self._begin)
 
     def _begin(self):
-        # 1. 计算所需高度 (包含即将追加的 Tag)
         tag_preview = f"  [AI: {int(self.ai_rate)}%]"
         full_text_preview = self.content + tag_preview
         
-        # 使用 QFontMetrics 精确计算
-        available_w = max(100, self.width() - 30) # 减去 padding
+        available_w = max(100, self.width() - 30) 
         font = self.text_label.font()
         fm = QFontMetrics(font)
         rect = fm.boundingRect(0, 0, available_w, 10000, Qt.TextWordWrap | Qt.AlignLeft, full_text_preview)
         
-        target_h = rect.height() + 35 # 增加一点垂直缓冲
+        target_h = rect.height() + 35 
         
         self.setFixedHeight(target_h)
         self.content_widget.resize(self.width(), target_h)
         
-        # 2. 启动入场动画
         self.anim_entry.setStartValue(0.0)
         self.anim_entry.setEndValue(1.0)
         self.anim_entry.start()
         
-        # 3. 启动打字机
         self.timer_type.start()
 
     def _step_typewriter(self):
-        batch = 6 # 每次显示6个字符，加快一点
+        batch = 6 
         self._typewriter_idx += batch
         
-        # 获取当前显示的纯文本
         current_plain = self.content[:self._typewriter_idx]
         escaped_text = html.escape(current_plain)
         self.text_label.setText(escaped_text)
         
         if self._typewriter_idx >= len(self.content):
             self.timer_type.stop()
-            # 打字结束，追加带有颜色的 AI 标签
             final_plain = html.escape(self.content)
-            
-            # 获取颜色 Hex
             c = QColor(self.accent_color)
             color_hex = c.name() 
-            
-            # 构造 HTML
             tag_html = f"&nbsp;&nbsp;<span style='color:{color_hex}; font-weight:bold; font-size:10pt;'>[AI: {int(self.ai_rate)}% | {self.verdict}]</span>"
             self.text_label.setText(final_plain + tag_html)
 
     def paintEvent(self, event):
-        # 绘制背景
         if self._opacity > 0:
             p = QPainter(self)
             p.setRenderHint(QPainter.Antialiasing)
             p.setOpacity(self._opacity)
             
-            # 这里的坐标系是 ResultBlock 的，我们需要根据 content_widget 的位置来绘图吗？
-            # 不，我们直接绘制在 ResultBlock 上，但是位置要跟 content_widget 一致，或者直接变换坐标系
-            # 为了简单，我们手动加上 _slide_offset_x
-            
             trans = QTransform()
             trans.translate(self._slide_offset_x, 0)
             p.setTransform(trans)
             
-            # 背景色
             bg_c = QColor(Theme.get('input_bg'))
-            # 稍微加深高风险段落的背景
             if self.ai_rate > 60:
                 bg_c = QColor(Theme.ACCENT_RED)
                 bg_c.setAlpha(15) 
             
             p.setBrush(bg_c)
             p.setPen(Qt.NoPen)
-            # 留出一点边距
             draw_rect = self.rect().adjusted(5, 2, -5, -2)
             p.drawRoundedRect(draw_rect, 8, 8)
             
-            # 左侧装饰线
             line_c = QColor(self.accent_color)
             line_c.setAlpha(180)
             p.setBrush(line_c)
             p.drawRoundedRect(QRectF(5, 10, 3, self.height()-20), 1.5, 1.5)
 
     def resizeEvent(self, event):
-        # 保持内部容器宽度同步
         self.content_widget.resize(self.width(), self.height())
         super().resizeEvent(event)
 
@@ -466,6 +460,7 @@ class AIGCDetectionThread(QThread):
         self.model_path = model_path
 
     def run(self):
+        # 使用更新后的路径检查
         if not self.model_path or not os.path.exists(self.model_path):
             self.result_signal.emit({"error": "模型路径无效"})
             return
@@ -476,6 +471,7 @@ class AIGCDetectionThread(QThread):
             self.progress_signal.emit(10)
             
             self.status_signal.emit("加载本地权重 (config, bin, vocab)...")
+            # local_files_only=True 确保只使用本地文件
             tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
             model = AutoModelForSequenceClassification.from_pretrained(self.model_path, local_files_only=True)
             detector = pipeline("text-classification", model=model, tokenizer=tokenizer, device=device)
@@ -528,7 +524,6 @@ class AIGCSentinel(QMainWindow):
         self.is_model_valid = False
         self.model_path = ""
         
-        # 转场动画覆盖层
         self.transition_overlay = QLabel(self)
         self.transition_overlay.hide()
         self.transition_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
@@ -599,8 +594,9 @@ class AIGCSentinel(QMainWindow):
         else: QMessageBox.warning(self, "状态更新", "仍然未检测到完整模型。\n请确保文件夹包含: config.json, pytorch_model.bin, vocab.txt 等")
 
     def check_model_status(self):
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        target_dir = os.path.join(base_dir, "AIGC_Model")
+        # 使用自定义的 get_resource_path 函数来获取模型路径
+        # 这确保了无论是在开发环境还是在打包后的 EXE 中都能找到 'AIGC_Model'
+        target_dir = get_resource_path("AIGC_Model")
         
         if not os.path.exists(target_dir):
             self.set_model_invalid("未找到 'AIGC_Model' 文件夹")
@@ -650,9 +646,8 @@ class AIGCSentinel(QMainWindow):
         self.btn_clear.update()
         self.btn_detect.update()
         self.progress_bar.update()
-        self.input_edit.update() # 刷新输入框
+        self.input_edit.update() 
         
-        # 刷新结果列表中的所有卡片
         for i in range(self.result_layout.count()):
             w = self.result_layout.itemAt(i).widget()
             if w: w.update()
@@ -696,7 +691,6 @@ class AIGCSentinel(QMainWindow):
 
     def clear_content(self):
         self.input_edit.clear()
-        # 清空结果布局
         while self.result_layout.count():
             item = self.result_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -711,7 +705,6 @@ class AIGCSentinel(QMainWindow):
             self.btn_detect.setText("⚠️ 内容为空"); QTimer.singleShot(1500, lambda: self.btn_detect.setText("⚡ 开始深度检测")); return
         self.btn_detect.setEnabled(False); self.btn_detect.setText("正在分析...")
         
-        # 清空现有结果
         while self.result_layout.count():
             item = self.result_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -728,17 +721,14 @@ class AIGCSentinel(QMainWindow):
         if "error" in res: QMessageBox.critical(self, "检测中断", res["error"]); return
         self.gauge.setValue(res["total_ai_rate"])
         
-        # 动态创建卡片
         delay_counter = 0
         for p in res["paragraphs"]:
             block = ResultBlock(p["content"], p["ai_rate"])
             self.result_layout.addWidget(block)
-            
-            # 级联触发动画 (每个卡片延迟 150ms 触发)
             block.start_reveal(delay_counter)
             delay_counter += 150
             
-        self.result_layout.addStretch() # 底部顶起
+        self.result_layout.addStretch()
 
     def handle_file_content(self, path):
         try:
