@@ -1,793 +1,766 @@
-import os
 import sys
-import re
-import threading
-import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog, messagebox
+import os
 import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import random
 import math
+import time
+import html
 
-# 尝试导入拖拽库
+# --- 依赖库安全导入 ---
 try:
-    import windnd
-
-    WINDND_SUPPORT = True
+    import chardet
+    HAS_CHARDET = True
 except ImportError:
-    WINDND_SUPPORT = False
+    HAS_CHARDET = False
 
-# 尝试导入 docx 库
 try:
-    from docx import Document
-
-    DOCX_SUPPORT = True
+    import docx
+    HAS_DOCX = True
 except ImportError:
-    DOCX_SUPPORT = False
+    HAS_DOCX = False
 
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QTextEdit, QPushButton,
+    QVBoxLayout, QHBoxLayout, QWidget, QLabel, QFrame,
+    QFileDialog, QMessageBox, QSplitter, QGraphicsDropShadowEffect,
+    QProgressBar, QSizePolicy, QSpacerItem, QGraphicsOpacityEffect,
+    QScrollArea
+)
+from PySide6.QtCore import (
+    Qt, Signal, QThread, QSize, Property, QPropertyAnimation, 
+    QEasingCurve, QRectF, QPointF, QParallelAnimationGroup, QTimer,
+    QAbstractAnimation, QByteArray, QSequentialAnimationGroup
+)
+from PySide6.QtGui import (
+    QColor, QLinearGradient, QPainter, QFont, QTextCursor, 
+    QTextCharFormat, QPen, QPolygonF, QBrush, QPalette, QIcon, QRadialGradient,
+    QPainterPath, QPixmap, QTransform, QFontMetrics
+)
 
-# --- 核心：PyInstaller 打包路径自适应函数 ---
-def get_resource_path(relative_path):
-    """
-    自适应获取资源路径，确保在开发环境、_internal 文件夹内、exe 同级目录均能找到模型
-    """
-    if hasattr(sys, '_MEIPASS'):
-        # PyInstaller 打包后的临时解压根目录
-        base_dir = sys._MEIPASS
-    else:
-        # 普通 Python 开发环境路径
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # 定义可能的搜索路径优先级
-    possible_paths = [
-        os.path.join(base_dir, relative_path),  # 1. 根目录
-        os.path.join(base_dir, "_internal", relative_path),  # 2. _internal 内部 (新版默认)
-        os.path.join(os.path.dirname(sys.executable), relative_path),  # 3. exe 同级目录
-        os.path.abspath(relative_path)  # 4. 当前工作目录
-    ]
-
-    for path in possible_paths:
-        if os.path.exists(path):
-            return path
-
-    # 如果都没找到，返回基于 base_dir 的默认路径（后续加载会抛出具体错误供排查）
-    return os.path.join(base_dir, relative_path)
-
-
-# ================= 设置区域 =================
-# 自动寻找模型文件夹 AIGC_Model
-LOCAL_MODEL_PATH = get_resource_path("AIGC_Model")
-
-
-# ===========================================
-
-class ModernButton(tk.Canvas):
-    """高级圆角立体按钮 - 具有平滑物理过渡动效"""
-
-    def __init__(self, parent, text, command, width=220, height=50, color="#0071E3", text_color="white", font_size=11):
-        super().__init__(parent, width=width, height=height + 10, bg=parent["bg"], highlightthickness=0, cursor="hand2")
-        self.command = command
-        self.base_color = color
-        self.shadow_color = self.get_shadow_color(color)
-        self.text_color = text_color
-        self.text_content = text
-        self.base_width = width
-        self.base_height = height
-        self.font_size = font_size
-        self.scale = 1.0
-
-        # 动画状态
-        self.press_offset = 0.0  # 0.0 (未按下) 到 1.0 (完全按下)
-        self.target_press = 0.0
-        self.is_disabled = False
-        self.anim_id = None
-
-        self.render()
-
-        self.bind("<Button-1>", self.on_press)
-        self.bind("<ButtonRelease-1>", self.on_release)
-        self.bind("<Enter>", self.on_hover)
-        self.bind("<Leave>", self.on_leave)
-
-    def get_shadow_color(self, hex_color):
-        hex_color = hex_color.lstrip('#')
-        rgb = tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
-        darker_rgb = tuple(max(0, int(c * 0.7)) for c in rgb)
-        return '#%02x%02x%02x' % darker_rgb
-
-    def on_hover(self, e):
-        if not self.is_disabled:
-            self.itemconfig("bg", fill=self.adjust_brightness(self.base_color, 1.1))
-
-    def on_leave(self, e):
-        if not self.is_disabled:
-            self.itemconfig("bg", fill=self.base_color)
-
-    def adjust_brightness(self, hex_color, factor):
-        hex_color = hex_color.lstrip('#')
-        rgb = [int(hex_color[i:i + 2], 16) for i in (0, 2, 4)]
-        new_rgb = [min(255, int(c * factor)) for c in rgb]
-        return '#%02x%02x%02x' % tuple(new_rgb)
-
-    def animate_press(self):
-        diff = self.target_press - self.press_offset
-        if abs(diff) > 0.01:
-            self.press_offset += diff * 0.3
-            self.render()
-            self.anim_id = self.after(10, self.animate_press)
-        else:
-            self.press_offset = self.target_press
-            self.render()
-            self.anim_id = None
-
-    def on_press(self, event):
-        if self.is_disabled: return
-        if self.anim_id: self.after_cancel(self.anim_id)
-        self.target_press = 1.0
-        self.animate_press()
-
-    def on_release(self, event):
-        if self.is_disabled: return
-        if self.anim_id: self.after_cancel(self.anim_id)
-        self.target_press = 0.0
-        self.animate_press()
-        self.after(80, self.command)
-
-    def set_text(self, new_text):
-        self.text_content = new_text
-        self.render()
-
-    def set_state(self, disabled=False):
-        self.is_disabled = disabled
-        self.config(cursor="arrow" if disabled else "hand2")
-        self.render()
-
-    def render(self):
-        self.delete("all")
-        w, h = int(self.base_width * self.scale), int(self.base_height * self.scale)
-        r = 16 * self.scale
-        max_offset = 6 * self.scale
-        current_offset = self.press_offset * max_offset
-
-        current_bg = self.base_color if not self.is_disabled else "#A1A1A6"
-        current_shadow = self.shadow_color if not self.is_disabled else "#8E8E93"
-
-        self.draw_round_rect(0, max_offset, w, h + max_offset, r, fill=current_shadow, tags="shadow")
-        self.draw_round_rect(0, current_offset, w, h + current_offset, r, fill=current_bg, tags="bg")
-        self.create_text(w / 2, h / 2 + current_offset, text=self.text_content, fill=self.text_color,
-                         font=("Microsoft YaHei UI", int(self.font_size * self.scale), "bold"), tags="txt")
-
-    def draw_round_rect(self, x, y, w, h, r, **kwargs):
-        points = [x + r, y, x + w - r, y, x + w, y, x + w, y + r, x + w, y + h - r, x + w, y + h, x + w - r, y + h,
-                  x + r, y + h, x, y + h, x, y + h - r, x, y + r, x, y]
-        return self.create_polygon(points, **kwargs, smooth=True)
-
-    def update_size(self, scale):
-        self.scale = scale
-        self.config(width=int(self.base_width * scale), height=int((self.base_height + 10) * scale))
-        self.render()
-
-    def update_theme(self, bg_color, color=None, text_color=None):
-        self.config(bg=bg_color)
-        if color:
-            self.base_color = color
-            self.shadow_color = self.get_shadow_color(color)
-        if text_color: self.text_color = text_color
-        self.render()
-
-
-class ThemeSwitch(tk.Canvas):
-    def __init__(self, parent, command):
-        super().__init__(parent, width=64, height=32, bg=parent["bg"], highlightthickness=0, cursor="hand2")
-        self.command = command
-        self.is_dark = False
-        self.pos = 4
-        self.anim_id = None
-        self.bind("<Button-1>", self.toggle)
-        self.render()
-
-    def toggle(self, event=None):
-        self.is_dark = not self.is_dark
-        if self.anim_id: self.after_cancel(self.anim_id)
-        self.animate_switch()
-        self.command(self.is_dark)
-
-    def animate_switch(self):
-        target = 36 if self.is_dark else 4
-        step = (target - self.pos) / 4
-        if abs(self.pos - target) > 0.5:
-            self.pos += step
-            self.render()
-            self.anim_id = self.after(15, self.animate_switch)
-        else:
-            self.pos = target
-            self.render()
-            self.anim_id = None
-
-    def render(self):
-        self.delete("all")
-        bg = "#3A3A3C" if self.is_dark else "#E5E5E7"
-        circle = "#FFFFFF" if not self.is_dark else "#0A84FF"
-        self.draw_round_rect(0, 0, 64, 32, 16, fill=bg)
-        self.draw_round_rect(self.pos, 4, self.pos + 24, 28, 12, fill=circle)
-
-    def draw_round_rect(self, x1, y1, x2, y2, r, **kwargs):
-        points = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2, x1, y2, x1,
-                  y2 - r, x1, y1 + r, x1, y1]
-        return self.create_polygon(points, **kwargs, smooth=True)
-
-
-class AIGCDetectorPro:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("AIGC 哨兵 - 深度智能检测引擎")
-
-        self.ref_width = 1360
-        self.ref_height = 900
-
-        self.is_dark = False
-        self.fixed_input_bg = "#1C1C1E"
-        self.fixed_input_fg = "#F5F5F7"
-        self.fixed_border_deep = "#2C2C2E"
-
-        self.themes = {
-            "light": {
-                "bg": "#F5F5F7", "sidebar": "#FFFFFF", "accent": "#0071E3",
-                "text": "#1D1D1F", "text_sub": "#6E6E73", "border": "#D2D2D7",
-                "card": "#FFFFFF", "reset": "#E8E8ED", "reset_text": "#1D1D1F", "gauge_bg": "#F2F2F7",
-                "shadow": "#E0E0E6"
-            },
-            "dark": {
-                "bg": "#000000", "sidebar": "#1C1C1E", "accent": "#0A84FF",
-                "text": "#F5F5F7", "text_sub": "#86868B", "border": "#323234",
-                "card": "#1C1C1E", "reset": "#2C2C2E", "reset_text": "#F5F5F7", "gauge_bg": "#2C2C2E",
-                "shadow": "#0F0F0F"
-            }
+# ---------------------- 核心配色与状态管理 ----------------------
+class Theme:
+    CURRENT_MODE = 'dark'
+    COLORS = {
+        'dark': {
+            'bg_main': "#121214",
+            'bg_card': "#1E1E24",
+            'text_main': "#FFFFFF",
+            'text_sub': "#A0A0A0",
+            'border': "#333333",
+            'input_bg': "#16161A",
+            'scroll': "#2A2A30",
+            'btn_face': "#2D79FF",
+            'btn_side': "#1B4DB3",
+            'btn_sec_face': "#2A2A30",
+            'btn_sec_side': "#1A1A20",
+            'shadow': QColor(0, 0, 0, 150)
+        },
+        'light': {
+            'bg_main': "#F2F5F8",
+            'bg_card': "#FFFFFF",
+            'text_main': "#333333",
+            'text_sub': "#666666",
+            'border': "#E0E0E0",
+            'input_bg': "#FAFAFA",
+            'scroll': "#D0D0D0",
+            'btn_face': "#2D79FF",
+            'btn_side': "#1B4DB3",
+            'btn_sec_face': "#FFFFFF",
+            'btn_sec_side': "#D1D9E6",
+            'shadow': QColor(0, 0, 0, 30)
         }
-        self.current_colors = self.themes["light"].copy()
-        self.colors = self.themes["light"]
-        self.safe_color, self.warn_color, self.danger_color = "#34C759", "#FF9500", "#FF3B30"
+    }
+    ACCENT_GREEN = "#00E070"
+    ACCENT_RED = "#FF453A"
+    ACCENT_YELLOW = "#FFD60A"
+    ACCENT_BLUE = "#2D79FF"
 
-        self.setup_window()
-        self.init_variables()
-        self.build_ui()
-        self.setup_text_tags()
-        self.setup_drag_and_drop()
+    @classmethod
+    def get(cls, key):
+        return cls.COLORS[cls.CURRENT_MODE].get(key, "#FF00FF")
 
-        self.root.bind("<Configure>", self.on_resize)
-        threading.Thread(target=self.load_model, daemon=True).start()
+    @classmethod
+    def toggle(cls):
+        cls.CURRENT_MODE = 'light' if cls.CURRENT_MODE == 'dark' else 'dark'
 
-    def setup_window(self):
+    @staticmethod
+    def shadow(radius=20):
+        effect = QGraphicsDropShadowEffect()
+        effect.setBlurRadius(radius)
+        effect.setXOffset(0)
+        effect.setYOffset(4)
+        c = Theme.COLORS[Theme.CURRENT_MODE]['shadow']
+        effect.setColor(c)
+        return effect
+
+# ---------------------- 自定义 UI 组件 ----------------------
+
+class ThemeSwitch(QWidget):
+    toggled = Signal(bool) 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(60, 32)
+        self.setCursor(Qt.PointingHandCursor)
+        self._is_dark = True
+        self._thumb_x = 30 
+        self.anim = QPropertyAnimation(self, b"thumb_pos", self)
+        self.anim.setDuration(250)
+        self.anim.setEasingCurve(QEasingCurve.InOutQuad)
+
+    @Property(float)
+    def thumb_pos(self): return self._thumb_x
+    @thumb_pos.setter
+    def thumb_pos(self, val): self._thumb_x = val; self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._is_dark = not self._is_dark
+            start, end = (self._thumb_x, 30) if self._is_dark else (self._thumb_x, 4)
+            self.anim.stop(); self.anim.setStartValue(start); self.anim.setEndValue(end); self.anim.start()
+            self.toggled.emit(self._is_dark)
+
+    def paintEvent(self, event):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QColor("#333333") if self._is_dark else QColor("#D0D0D0"))
+        p.setPen(Qt.NoPen); p.drawRoundedRect(0, 0, 56, 28, 14, 14)
+        p.setFont(QFont("Segoe UI Emoji", 10))
+        if self._is_dark: p.setPen(QColor("#666")); p.drawText(8, 19, "☀️")
+        else: p.setPen(QColor("#FFF")); p.drawText(36, 19, "🌙")
+        p.setBrush(QColor("#121214") if self._is_dark else QColor("#FFFFFF"))
+        p.drawEllipse(int(self._thumb_x), 2, 24, 24)
+
+class ThreeDButton(QPushButton):
+    def __init__(self, text, is_primary=True, parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedHeight(50)
+        self.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.Bold))
+        self._is_primary = is_primary
+        self._is_pressed = False
+        self._offset_y = 5 
+        self._hover_progress = 0.0
+        self.anim = QPropertyAnimation(self, b"hover_progress", self)
+        self.anim.setDuration(150)
+
+    @Property(float)
+    def hover_progress(self): return self._hover_progress
+    @hover_progress.setter
+    def hover_progress(self, val): self._hover_progress = val; self.update()
+
+    def enterEvent(self, e): self.anim.stop(); self.anim.setEndValue(1.0); self.anim.start(); super().enterEvent(e)
+    def leaveEvent(self, e): self.anim.stop(); self.anim.setEndValue(0.0); self.anim.start(); super().leaveEvent(e)
+    def mousePressEvent(self, e): 
+        if e.button() == Qt.LeftButton: self._is_pressed = True; self.update()
+        super().mousePressEvent(e)
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton: self._is_pressed = False; self.update()
+        super().mouseReleaseEvent(e)
+
+    def paintEvent(self, event):
+        painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        
+        if self._is_primary:
+            face_c, side_c, txt_c = QColor(Theme.get('btn_face')), QColor(Theme.get('btn_side')), QColor("white")
+        else:
+            face_c, side_c = QColor(Theme.get('btn_sec_face')), QColor(Theme.get('btn_sec_side'))
+            txt_c = QColor("white") if Theme.CURRENT_MODE == 'dark' else QColor("#333")
+
+        if self._hover_progress > 0:
+            face_c = face_c.lighter(105); side_c = side_c.lighter(105)
+        
+        current_offset = self._offset_y if not self._is_pressed else 2
+        face_h = h - self._offset_y
+        
+        path_side = QPainterPath()
+        path_side.addRoundedRect(QRectF(0, self._offset_y, w, face_h), 12, 12)
+        painter.setBrush(side_c); painter.setPen(Qt.NoPen); painter.drawPath(path_side)
+
+        top_y = 0 if not self._is_pressed else (self._offset_y - 2)
+        rect_face = QRectF(0, top_y, w, face_h)
+        painter.setBrush(face_c); painter.drawRoundedRect(rect_face, 12, 12)
+        painter.setPen(txt_c); painter.drawText(rect_face, Qt.AlignCenter, self.text())
+
+class ModernProgressBar(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent); self.setFixedHeight(6); self._value = 0
+    def setValue(self, v): self._value = v; self.update()
+    def paintEvent(self, event):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing); rect = self.rect()
+        bg_c = QColor("#333") if Theme.CURRENT_MODE == 'dark' else QColor("#DDD")
+        p.setBrush(bg_c); p.setPen(Qt.NoPen); p.drawRoundedRect(rect, 3, 3)
+        if self._value <= 0: return
+        w = rect.width() * (self._value / 100.0)
+        grad = QLinearGradient(0, 0, w, 0)
+        grad.setColorAt(0, QColor("#2D79FF")); grad.setColorAt(1, QColor("#00F0FF"))
+        p.setBrush(grad); p.drawRoundedRect(QRectF(0, 0, w, rect.height()), 3, 3)
+
+class AIGCGaugeWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent); self.setMinimumHeight(260); self._value = 0
+        self.animation = QPropertyAnimation(self, b"value"); self.animation.setDuration(800); self.animation.setEasingCurve(QEasingCurve.OutCubic) 
+    @Property(float)
+    def value(self): return self._value
+    @value.setter
+    def value(self, v): self._value = v; self.update()
+    def setValue(self, v): self.animation.stop(); self.animation.setStartValue(self._value); self.animation.setEndValue(v); self.animation.start()
+    def get_color(self, val):
+        if val < 30: return QColor(Theme.ACCENT_GREEN)
+        if val < 60: return QColor(Theme.ACCENT_YELLOW)
+        return QColor(Theme.ACCENT_RED)
+    def paintEvent(self, event):
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height(); side = min(w, h * 1.5)
+        p.translate(w / 2, h * 0.85); scale = side / 320; p.scale(scale, scale)
+        color = self.get_color(self._value)
+        alpha = 40 if Theme.CURRENT_MODE == 'dark' else 10
+        glow = QRadialGradient(0, 0, 150); glow.setColorAt(0, QColor(color.red(), color.green(), color.blue(), alpha)); glow.setColorAt(1, QColor(color.red(), color.green(), color.blue(), 0))
+        p.setBrush(glow); p.setPen(Qt.NoPen); p.drawEllipse(-150, -150, 300, 300)
+        p.setFont(QFont("Microsoft YaHei", 11, QFont.Bold)); p.setPen(QColor(Theme.get('text_sub'))); p.drawText(QRectF(-100, -170, 200, 30), Qt.AlignCenter, "AIGC 疑似度")
+        track_color = QColor(40, 40, 45) if Theme.CURRENT_MODE == 'dark' else QColor(220, 220, 220)
+        p.setPen(QPen(track_color, 18, Qt.SolidLine, Qt.RoundCap)); p.drawArc(QRectF(-110, -110, 220, 220), 180 * 16, -180 * 16)
+        p.setPen(QPen(color, 18, Qt.SolidLine, Qt.RoundCap)); span = -(self._value / 100.0) * 180 * 16; p.drawArc(QRectF(-110, -110, 220, 220), 180 * 16, span)
+        p.setPen(QColor(Theme.get('text_main'))); p.setFont(QFont("Segoe UI", 42, QFont.Bold)); p.drawText(QRectF(-100, -80, 200, 60), Qt.AlignCenter, f"{int(self._value)}%")
+        p.save(); angle = (self._value / 100.0) * 180 - 90; p.rotate(angle)
+        pointer_c = QColor("white") if Theme.CURRENT_MODE == 'dark' else QColor("#333")
+        p.setBrush(QBrush(pointer_c)); p.setPen(Qt.NoPen); p.drawPolygon(QPolygonF([QPointF(-6, 0), QPointF(6, 0), QPointF(0, -98)]))
+        p.setBrush(QBrush(QColor(Theme.get('bg_card')))); p.setPen(QPen(pointer_c, 3)); p.drawEllipse(-8, -8, 16, 16); p.restore()
+
+# ---------------------- 交互增强组件 ----------------------
+
+class DragTextEdit(QTextEdit):
+    """
+    具有吸附和发光动效的编辑器
+    """
+    file_dropped = Signal(str)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setPlaceholderText("在此处粘贴文本或拖入文件...")
+        
+        self._glow_strength = 0.0 # 0.0 - 1.0
+        self._scale_factor = 1.0  # 1.0 - 1.02
+        
+        self.anim_glow = QPropertyAnimation(self, b"glow_strength", self)
+        self.anim_glow.setDuration(300)
+        self.anim_glow.setEasingCurve(QEasingCurve.OutQuad)
+        
+        self.anim_scale = QPropertyAnimation(self, b"scale_factor", self)
+        self.anim_scale.setDuration(300)
+        self.anim_scale.setEasingCurve(QEasingCurve.OutBack)
+
+    @Property(float)
+    def glow_strength(self): return self._glow_strength
+    @glow_strength.setter
+    def glow_strength(self, v): self._glow_strength = v; self.update()
+
+    @Property(float)
+    def scale_factor(self): return self._scale_factor
+    @scale_factor.setter
+    def scale_factor(self, v): self._scale_factor = v; self.update()
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.accept()
+            self.anim_glow.stop(); self.anim_glow.setEndValue(1.0); self.anim_glow.start()
+            self.anim_scale.stop(); self.anim_scale.setEndValue(1.02); self.anim_scale.start()
+        else: e.ignore()
+
+    def dragLeaveEvent(self, e):
+        self.anim_glow.stop(); self.anim_glow.setEndValue(0.0); self.anim_glow.start()
+        self.anim_scale.stop(); self.anim_scale.setEndValue(1.0); self.anim_scale.start()
+        super().dragLeaveEvent(e)
+
+    def dropEvent(self, e):
+        self.anim_glow.stop(); self.anim_glow.setEndValue(0.0); self.anim_glow.start()
+        self.anim_scale.stop(); self.anim_scale.setEndValue(1.0); self.anim_scale.start()
+        urls = e.mimeData().urls()
+        if urls:
+            path = urls[0].toLocalFile()
+            if os.path.splitext(path)[1].lower() in ['.txt', '.docx']: self.file_dropped.emit(path)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._glow_strength > 0.01:
+            p = QPainter(self.viewport())
+            p.setRenderHint(QPainter.Antialiasing)
+            glow_c = QColor(Theme.ACCENT_BLUE)
+            glow_c.setAlpha(int(150 * self._glow_strength))
+            path = QPainterPath()
+            path.addRoundedRect(self.viewport().rect().adjusted(2,2,-2,-2), 8, 8)
+            p.setPen(QPen(glow_c, 4 * self._glow_strength))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
+
+class ResultBlock(QWidget):
+    """
+    单个结果段落卡片 - 侧滑版
+    特性：
+    1. 无遮挡：移除了侧滑信息卡
+    2. 内联标签：AI率直接追加在文字末尾
+    3. 侧滑入场：从右侧平滑滑入
+    """
+    def __init__(self, content, ai_rate, parent=None):
+        super().__init__(parent)
+        self.content = content
+        self.ai_rate = ai_rate
+        self.setFixedHeight(0) # 初始高度0
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        
+        # 1. 颜色判定
+        if ai_rate < 30: 
+            self.accent_color = Theme.ACCENT_GREEN
+            self.verdict = "人类创作"
+        elif ai_rate < 60: 
+            self.accent_color = Theme.ACCENT_YELLOW
+            self.verdict = "疑似混写"
+        else: 
+            self.accent_color = Theme.ACCENT_RED
+            self.verdict = "疑似生成"
+
+        # 2. 内部容器 (用于实现整体内容的位移动画)
+        # 我们不直接在 paintEvent 里移动 Painter，而是移动这个内部 Widget
+        self.content_widget = QWidget(self)
+        self.content_widget.move(100, 0) # 初始位置偏移
+
+        # 3. 布局
+        self.layout = QVBoxLayout(self.content_widget)
+        self.layout.setContentsMargins(15, 12, 15, 12)
+        
+        # 文本标签 (RichText)
+        self.text_label = QLabel("")
+        self.text_label.setWordWrap(True)
+        self.text_label.setStyleSheet(f"color: {Theme.get('text_sub')}; font-size: 11pt; line-height: 1.6;")
+        self.text_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.text_label.setTextFormat(Qt.RichText) # 启用富文本
+        
+        self.layout.addWidget(self.text_label)
+
+        # 4. 动画状态
+        self._typewriter_idx = 0
+        self._opacity = 0.0
+        self._slide_offset_x = 80.0 # 初始向右偏移 80px
+
+        self.anim_entry = QPropertyAnimation(self, b"entry_val", self)
+        self.anim_entry.setDuration(700)
+        self.anim_entry.setEasingCurve(QEasingCurve.OutCubic)
+        
+        self.timer_type = QTimer(self)
+        self.timer_type.setInterval(5) # 打字速度
+
+        # 连接打字机信号
+        self.timer_type.timeout.connect(self._step_typewriter)
+
+    @Property(float)
+    def entry_val(self): return self._opacity
+    @entry_val.setter
+    def entry_val(self, v):
+        self._opacity = v
+        # 动画逻辑：v 从 0 -> 1
+        # slide_offset 从 80 -> 0 (从右向左滑)
+        self._slide_offset_x = 80.0 * (1.0 - v)
+        
+        # 更新内部容器位置
+        self.content_widget.move(int(self._slide_offset_x), 0)
+        self.update() # 触发重绘更新透明度
+
+    def start_reveal(self, delay=0):
+        QTimer.singleShot(delay, self._begin)
+
+    def _begin(self):
+        # 1. 计算所需高度 (包含即将追加的 Tag)
+        tag_preview = f"  [AI: {int(self.ai_rate)}%]"
+        full_text_preview = self.content + tag_preview
+        
+        # 使用 QFontMetrics 精确计算
+        available_w = max(100, self.width() - 30) # 减去 padding
+        font = self.text_label.font()
+        fm = QFontMetrics(font)
+        rect = fm.boundingRect(0, 0, available_w, 10000, Qt.TextWordWrap | Qt.AlignLeft, full_text_preview)
+        
+        target_h = rect.height() + 35 # 增加一点垂直缓冲
+        
+        self.setFixedHeight(target_h)
+        self.content_widget.resize(self.width(), target_h)
+        
+        # 2. 启动入场动画
+        self.anim_entry.setStartValue(0.0)
+        self.anim_entry.setEndValue(1.0)
+        self.anim_entry.start()
+        
+        # 3. 启动打字机
+        self.timer_type.start()
+
+    def _step_typewriter(self):
+        batch = 6 # 每次显示6个字符，加快一点
+        self._typewriter_idx += batch
+        
+        # 获取当前显示的纯文本
+        current_plain = self.content[:self._typewriter_idx]
+        escaped_text = html.escape(current_plain)
+        self.text_label.setText(escaped_text)
+        
+        if self._typewriter_idx >= len(self.content):
+            self.timer_type.stop()
+            # 打字结束，追加带有颜色的 AI 标签
+            final_plain = html.escape(self.content)
+            
+            # 获取颜色 Hex
+            c = QColor(self.accent_color)
+            color_hex = c.name() 
+            
+            # 构造 HTML
+            tag_html = f"&nbsp;&nbsp;<span style='color:{color_hex}; font-weight:bold; font-size:10pt;'>[AI: {int(self.ai_rate)}% | {self.verdict}]</span>"
+            self.text_label.setText(final_plain + tag_html)
+
+    def paintEvent(self, event):
+        # 绘制背景
+        if self._opacity > 0:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setOpacity(self._opacity)
+            
+            # 这里的坐标系是 ResultBlock 的，我们需要根据 content_widget 的位置来绘图吗？
+            # 不，我们直接绘制在 ResultBlock 上，但是位置要跟 content_widget 一致，或者直接变换坐标系
+            # 为了简单，我们手动加上 _slide_offset_x
+            
+            trans = QTransform()
+            trans.translate(self._slide_offset_x, 0)
+            p.setTransform(trans)
+            
+            # 背景色
+            bg_c = QColor(Theme.get('input_bg'))
+            # 稍微加深高风险段落的背景
+            if self.ai_rate > 60:
+                bg_c = QColor(Theme.ACCENT_RED)
+                bg_c.setAlpha(15) 
+            
+            p.setBrush(bg_c)
+            p.setPen(Qt.NoPen)
+            # 留出一点边距
+            draw_rect = self.rect().adjusted(5, 2, -5, -2)
+            p.drawRoundedRect(draw_rect, 8, 8)
+            
+            # 左侧装饰线
+            line_c = QColor(self.accent_color)
+            line_c.setAlpha(180)
+            p.setBrush(line_c)
+            p.drawRoundedRect(QRectF(5, 10, 3, self.height()-20), 1.5, 1.5)
+
+    def resizeEvent(self, event):
+        # 保持内部容器宽度同步
+        self.content_widget.resize(self.width(), self.height())
+        super().resizeEvent(event)
+
+
+# ---------------------- 核心检测线程 ----------------------
+class AIGCDetectionThread(QThread):
+    progress_signal = Signal(int)
+    result_signal = Signal(dict)
+    status_signal = Signal(str)
+
+    def __init__(self, text, model_path):
+        super().__init__()
+        self.text = text
+        self.model_path = model_path
+
+    def run(self):
+        if not self.model_path or not os.path.exists(self.model_path):
+            self.result_signal.emit({"error": "模型路径无效"})
+            return
+
         try:
-            from ctypes import windll
-            windll.shcore.SetProcessDpiAwareness(1)
-        except:
-            pass
-        self.root.geometry(f"{self.ref_width}x{self.ref_height}")
-        self.root.configure(bg=self.colors["bg"])
+            from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
+            device = 0 if torch.cuda.is_available() else -1
+            self.progress_signal.emit(10)
+            
+            self.status_signal.emit("加载本地权重 (config, bin, vocab)...")
+            tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
+            model = AutoModelForSequenceClassification.from_pretrained(self.model_path, local_files_only=True)
+            detector = pipeline("text-classification", model=model, tokenizer=tokenizer, device=device)
+            self.progress_signal.emit(30)
 
-    def init_variables(self):
-        self.model = None
-        self.tokenizer = None
-        self.is_ready = False
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.display_score = 0.0
-        self.target_score = 0.0
-        self.gauge_anim_id = None
-        self.analysis_running = False
-        self.transition_steps = 10
-        self.is_transitioning = False
-        self.resize_after_id = None  # 用于防抖并确保布局渲染完成
+            paragraphs = [p for p in self.text.split("\n") if p.strip()]
+            if not paragraphs:
+                self.result_signal.emit({"total_ai_rate": 0, "paragraphs": []})
+                return
 
-    def build_ui(self):
-        self.top_bar = tk.Frame(self.root, bg=self.colors["sidebar"], height=80)
-        self.top_bar.pack(fill="x")
-        self.top_bar.pack_propagate(False)
+            results = []
+            total_score = 0
+            total_chars = 0
 
-        self.logo_label = tk.Label(self.top_bar, text="AIGC 哨兵系统", font=("Microsoft YaHei UI", 20, "bold"),
-                                   fg=self.colors["text"], bg=self.colors["sidebar"])
-        self.logo_label.pack(side="left", padx=50)
+            for idx, para in enumerate(paragraphs):
+                self.status_signal.emit(f"深度指纹分析中... {idx+1}/{len(paragraphs)}")
+                try:
+                    inference = detector(para[:512])[0]
+                    label = inference['label'].lower()
+                    score = inference['score']
+                    
+                    is_ai_label = any(x in label for x in ['fake', 'ai', 'chatgpt', 'generated', '1', 'label_1'])
+                    
+                    if is_ai_label:
+                        ai_rate = round(score * 100, 2)
+                    else:
+                        ai_rate = round((1 - score) * 100, 2)
+                    
+                    results.append({"content": para, "ai_rate": ai_rate})
+                    total_score += (ai_rate * len(para))
+                    total_chars += len(para)
+                except Exception as e:
+                    print(f"Segment Error: {e}")
+                
+                self.progress_signal.emit(30 + int(((idx + 1) / len(paragraphs)) * 65))
 
-        self.switch_frame = tk.Frame(self.top_bar, bg=self.colors["sidebar"])
-        self.switch_frame.pack(side="right", padx=50)
+            avg = round(total_score / total_chars, 2) if total_chars > 0 else 0
+            self.result_signal.emit({"total_ai_rate": avg, "paragraphs": results})
 
-        self.theme_switch = ThemeSwitch(self.switch_frame, self.toggle_theme)
-        self.theme_switch.pack(side="right")
+        except Exception as e:
+            self.result_signal.emit({"error": f"推理引擎异常:\n{str(e)}"})
 
-        self.mode_label = tk.Label(self.switch_frame, text="深色模式", font=("Microsoft YaHei UI", 9, "bold"),
-                                   fg=self.colors["text_sub"], bg=self.colors["sidebar"])
-        self.mode_label.pack(side="right", padx=15)
+# ---------------------- 主窗口 ----------------------
 
-        self.status_text = tk.Label(self.top_bar, text="引擎待命", fg=self.colors["text_sub"],
-                                    bg=self.colors["sidebar"], font=("Microsoft YaHei UI", 10, "bold"))
-        self.status_text.pack(side="right", padx=30)
+class AIGCSentinel(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("AIGC 哨兵 - 智能溯源系统")
+        self.resize(1300, 850)
+        self.is_model_valid = False
+        self.model_path = ""
+        
+        # 转场动画覆盖层
+        self.transition_overlay = QLabel(self)
+        self.transition_overlay.hide()
+        self.transition_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.transition_effect = QGraphicsOpacityEffect(self.transition_overlay)
+        self.transition_overlay.setGraphicsEffect(self.transition_effect)
+        
+        self.init_ui(); self.update_theme(); self.check_model_status() 
 
-        self.container = tk.Frame(self.root, bg=self.colors["bg"])
-        self.container.pack(fill="both", expand=True, padx=50, pady=30)
+    def init_ui(self):
+        central = QWidget(); self.setCentralWidget(central)
+        layout = QVBoxLayout(central); layout.setContentsMargins(40, 40, 40, 30); layout.setSpacing(25)
 
-        self.left_col = tk.Frame(self.container, bg=self.colors["bg"])
-        self.left_col.pack(side="left", fill="both", expand=True)
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        self.title_lbl = QLabel("AIGC SENTINEL"); self.title_lbl.setStyleSheet("font-size: 28px; font-weight: 900; letter-spacing: 2px;")
+        self.sub_lbl = QLabel("深度学习文本溯源检测平台"); self.sub_lbl.setStyleSheet(f"font-size: 12px; font-weight: bold; letter-spacing: 1px; color: #2D79FF;")
+        title_box.addWidget(self.title_lbl); title_box.addWidget(self.sub_lbl)
+        header.addLayout(title_box); header.addStretch()
 
-        self.editor_shadow = tk.Frame(self.left_col, bg=self.colors["shadow"], padx=1, pady=1)
-        self.editor_shadow.pack(fill="both", expand=True, pady=(0, 25))
+        self.theme_switch = ThemeSwitch(); self.theme_switch.toggled.connect(self.toggle_theme)
+        header.addWidget(self.theme_switch); header.addSpacing(20)
 
-        self.editor_card = tk.Frame(self.editor_shadow, bg=self.fixed_input_bg, highlightthickness=1,
-                                    highlightbackground=self.colors["border"])
-        self.editor_card.pack(fill="both", expand=True)
+        self.btn_import = ThreeDButton("导入文档", is_primary=False, parent=self); self.btn_import.setFixedWidth(120); self.btn_import.clicked.connect(self.import_file)
+        self.btn_clear = ThreeDButton("清空", is_primary=False, parent=self); self.btn_clear.setFixedWidth(100); self.btn_clear.clicked.connect(self.clear_content)
+        self.btn_detect = ThreeDButton("⚡ 开始深度检测", parent=self); self.btn_detect.setFixedWidth(180); self.btn_detect.clicked.connect(self.run_detection)
+        header.addWidget(self.btn_import); header.addSpacing(10); header.addWidget(self.btn_clear); header.addSpacing(15); header.addWidget(self.btn_detect)
+        layout.addLayout(header)
 
-        self.editor_header = tk.Frame(self.editor_card, bg=self.fixed_input_bg, padx=25, pady=15)
-        self.editor_header.pack(fill="x")
+        splitter = QSplitter(Qt.Horizontal); splitter.setHandleWidth(20)
+        self.card_input = QFrame(); in_layout = QVBoxLayout(self.card_input)
+        self.label_input = QLabel("📝 原文输入 (支持 .txt / .docx 拖入)"); self.label_input.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
+        self.input_edit = DragTextEdit(); self.input_edit.file_dropped.connect(self.handle_file_content)
+        in_layout.addWidget(self.label_input); in_layout.addWidget(self.input_edit)
 
-        self.editor_label = tk.Label(self.editor_header, text="待检测内容", font=("Microsoft YaHei UI", 10, "bold"),
-                                     fg="#86868B", bg=self.fixed_input_bg)
-        self.editor_label.pack(side="left")
+        # --- 结果区域改造：QScrollArea ---
+        self.card_output = QFrame(); out_layout = QVBoxLayout(self.card_output)
+        self.gauge = AIGCGaugeWidget()
+        self.label_output = QLabel("🔍 逐段溯源分析"); self.label_output.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        
+        # 结果滚动区
+        self.result_scroll = QScrollArea()
+        self.result_scroll.setWidgetResizable(True)
+        self.result_scroll.setFrameShape(QFrame.NoFrame)
+        self.result_container = QWidget()
+        self.result_layout = QVBoxLayout(self.result_container)
+        self.result_layout.setAlignment(Qt.AlignTop)
+        self.result_layout.setSpacing(15)
+        self.result_scroll.setWidget(self.result_container)
+        
+        out_layout.addWidget(self.gauge); out_layout.addWidget(self.label_output); out_layout.addWidget(self.result_scroll); out_layout.setStretch(2, 3)
 
-        self.btn_import = ModernButton(self.editor_header, "导入文件", self.import_document,
-                                       width=120, height=34, color=self.colors["accent"], font_size=9)
-        self.btn_import.pack(side="right")
+        splitter.addWidget(self.card_input); splitter.addWidget(self.card_output); splitter.setSizes([600, 500])
+        layout.addWidget(splitter, stretch=1)
 
-        self.text_inner_shadow = tk.Frame(self.editor_card, bg=self.fixed_border_deep, height=1)
-        self.text_inner_shadow.pack(fill="x")
+        status_bar = QFrame(); status_bar.setFixedHeight(30); sb_layout = QHBoxLayout(status_bar); sb_layout.setContentsMargins(0,0,0,0)
+        self.status_icon = QLabel("●"); self.status_text = QLabel("初始化...")
+        self.status_text.setStyleSheet("font-size: 12px; font-weight: bold;")
+        self.btn_refresh = QPushButton("🔄 刷新状态"); self.btn_refresh.setCursor(Qt.PointingHandCursor); self.btn_refresh.setFixedSize(80, 24); self.btn_refresh.clicked.connect(self.manual_refresh_model)
+        sb_layout.addWidget(self.status_icon); sb_layout.addWidget(self.status_text); sb_layout.addWidget(self.btn_refresh); sb_layout.addStretch()
+        self.progress_bar = ModernProgressBar(); self.progress_bar.setFixedWidth(300); sb_layout.addWidget(self.progress_bar)
+        layout.addWidget(status_bar)
 
-        self.text_input = scrolledtext.ScrolledText(self.editor_card, font=("PingFang SC", 15),
-                                                    bg=self.fixed_input_bg, fg=self.fixed_input_fg,
-                                                    relief="flat", padx=30, pady=20,
-                                                    insertbackground="#0A84FF",
-                                                    undo=True)
-        self.text_input.pack(fill="both", expand=True)
+    def manual_refresh_model(self):
+        self.status_text.setText("正在扫描本地模型...")
+        self.status_text.setStyleSheet("color: #FFD60A; font-weight: bold;")
+        QApplication.processEvents(); QThread.msleep(300); self.check_model_status()
+        if self.is_model_valid: QMessageBox.information(self, "状态更新", "成功检测到本地模型！\n所有组件(Tokenizer/Model)均已就绪。")
+        else: QMessageBox.warning(self, "状态更新", "仍然未检测到完整模型。\n请确保文件夹包含: config.json, pytorch_model.bin, vocab.txt 等")
 
-        self.scan_action_frame = tk.Frame(self.left_col, bg=self.colors["bg"])
-        self.scan_action_frame.pack(fill="x", pady=(5, 0))
+    def check_model_status(self):
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        target_dir = os.path.join(base_dir, "AIGC_Model")
+        
+        if not os.path.exists(target_dir):
+            self.set_model_invalid("未找到 'AIGC_Model' 文件夹")
+            return
 
-        self.progress_container = tk.Frame(self.scan_action_frame, bg=self.colors["bg"])
-        self.progress_bar_bg = tk.Frame(self.progress_container, bg=self.colors["gauge_bg"], height=8)
-        self.progress_bar_bg.pack(side="left", fill="x", expand=True, padx=(0, 15))
-        self.progress_bar_fill = tk.Frame(self.progress_bar_bg, bg=self.colors["accent"], width=0, height=8)
-        self.progress_bar_fill.place(x=0, y=0)
-        self.progress_percent_label = tk.Label(self.progress_container, text="0%", font=("Helvetica", 10, "bold"),
-                                               fg=self.colors["accent"], bg=self.colors["bg"])
-        self.progress_percent_label.pack(side="right")
-
-        self.btn_run = ModernButton(self.left_col, "立即开始扫描", self.start_analysis, width=220, height=54, font_size=12)
-        self.btn_run.pack(anchor="w", pady=(10, 0))
-
-        self.right_col = tk.Frame(self.container, bg=self.colors["bg"], width=440)
-        self.right_col.pack(side="right", fill="both", padx=(50, 0))
-        self.right_col.pack_propagate(False)
-
-        self.gauge_shadow = tk.Frame(self.right_col, bg=self.colors["shadow"], padx=1, pady=1)
-        self.gauge_shadow.pack(fill="x", pady=(0, 25))
-
-        self.gauge_card = tk.Canvas(self.gauge_shadow, bg=self.colors["card"], highlightthickness=1,
-                                    highlightbackground=self.colors["border"], height=340)
-        self.gauge_card.pack(fill="x")
-
-        self.detail_label = tk.Label(self.right_col, text="风险评估详情", font=("Microsoft YaHei UI", 10, "bold"),
-                                     fg=self.colors["text_sub"], bg=self.colors["bg"])
-        self.detail_label.pack(anchor="w", pady=(0, 15))
-
-        self.list_wrap = tk.Frame(self.right_col, bg=self.colors["bg"])
-        self.list_wrap.pack(fill="both", expand=True)
-
-        self.results_canvas = tk.Canvas(self.list_wrap, bg=self.colors["bg"], highlightthickness=0)
-        self.results_inner = tk.Frame(self.results_canvas, bg=self.colors["bg"])
-        self.results_window = self.results_canvas.create_window((0, 0), window=self.results_inner, anchor="nw")
-
-        self.results_canvas.pack(side="left", fill="both", expand=True)
-
-        self.results_canvas.bind("<Enter>", lambda e: self.results_canvas.bind_all("<MouseWheel>", self.on_mousewheel))
-        self.results_canvas.bind("<Leave>", lambda e: self.results_canvas.unbind_all("<MouseWheel>"))
-
-        self.results_inner.bind("<Configure>",
-                                lambda e: self.results_canvas.configure(scrollregion=self.results_canvas.bbox("all")))
-
-        self.btn_reset = ModernButton(self.right_col, "重置数据", self.reset_interface,
-                                      width=180, height=46, color=self.colors["reset"],
-                                      text_color=self.colors["reset_text"], font_size=10)
-        self.btn_reset.pack(side="right", pady=(20, 0))
-
-    def on_mousewheel(self, event):
-        if self.results_canvas.bbox("all")[3] > self.results_canvas.winfo_height():
-            self.results_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    def setup_text_tags(self):
-        scale = self.get_scale()
-        fs = int(14 * (scale ** 0.8))
-        self.text_input.tag_configure("safe_tag", foreground="#30D158", font=("Microsoft YaHei UI", fs, "bold"))
-        self.text_input.tag_configure("warn_tag", foreground="#FF9F0A", font=("Microsoft YaHei UI", fs, "bold"))
-        self.text_input.tag_configure("danger_tag", foreground="#FF453A", font=("Microsoft YaHei UI", fs, "bold"))
-        self.text_input.tag_configure("active_para", background="#2C2C2E", relief="solid", borderwidth=1)
-        self.text_input.tag_raise("active_para")
-
-    def setup_drag_and_drop(self):
-        if WINDND_SUPPORT:
-            windnd.hook_dropfiles(self.root, func=self.on_file_dropped)
-
-    def on_file_dropped(self, files):
-        if not files: return
-        file_path = files[0].decode('gbk') if isinstance(files[0], bytes) else files[0]
-        self.load_file_to_editor(file_path)
-
-    def load_file_to_editor(self, file_path):
         try:
-            content = ""
-            ext = os.path.splitext(file_path)[1].lower()
-            if ext == '.docx' and DOCX_SUPPORT:
-                doc = Document(file_path)
-                content = "\n".join([para.text for para in doc.paragraphs])
-            elif ext in ['.txt', '.py', '.md', '.c']:
-                for encoding in ['utf-8', 'gbk']:
-                    try:
-                        with open(file_path, 'r', encoding=encoding) as f:
-                            content = f.read()
-                        break
-                    except:
-                        continue
-            if content.strip():
-                self.text_input.delete("1.0", tk.END)
-                self.text_input.insert(tk.END, content)
-                self.status_text.config(text="文件导入成功", fg=self.safe_color)
-        except:
-            self.status_text.config(text="加载失败", fg=self.danger_color)
+            files = os.listdir(target_dir)
+            has_config = "config.json" in files
+            has_bin = "pytorch_model.bin" in files or "model.safetensors" in files
+            has_vocab = "vocab.txt" in files
+            
+            if has_config and has_bin:
+                self.is_model_valid = True
+                self.model_path = target_dir
+                status_str = "本地引擎已加载"
+                if has_vocab: status_str += " | Vocab 字典已载入"
+                
+                self.status_icon.setStyleSheet(f"color: #00E070; font-size: 16px;")
+                self.status_text.setText(status_str)
+                self.status_text.setStyleSheet("color: #30D158; font-weight: bold;")
+            else:
+                missing = []
+                if not has_config: missing.append("config.json")
+                if not has_bin: missing.append("权重文件(.bin)")
+                self.set_model_invalid(f"缺失文件: {', '.join(missing)}")
+                
+        except Exception as e:
+            self.set_model_invalid(f"读取失败: {str(e)}")
+
+    def set_model_invalid(self, reason):
+        self.is_model_valid = False; self.model_path = ""
+        self.status_icon.setStyleSheet(f"color: #FF453A; font-size: 16px;")
+        self.status_text.setText(f"⚠️ 无法检测: {reason}"); self.status_text.setStyleSheet("color: #FF453A; font-weight: bold;")
 
     def toggle_theme(self, is_dark):
-        self.is_dark = is_dark
-        self.target_colors = self.themes["dark"] if is_dark else self.themes["light"]
-        self.start_colors = self.current_colors.copy()
-        self.is_transitioning = True
-        self.animate_theme_transition(0)
+        pixmap = self.grab()
+        self.transition_overlay.setPixmap(pixmap)
+        self.transition_overlay.setGeometry(0, 0, self.width(), self.height())
+        self.transition_overlay.show()
+        self.transition_effect.setOpacity(1.0)
+        
+        Theme.toggle()
+        self.update_theme()
+        
+        self.gauge.update()
+        self.btn_import.update()
+        self.btn_clear.update()
+        self.btn_detect.update()
+        self.progress_bar.update()
+        self.input_edit.update() # 刷新输入框
+        
+        # 刷新结果列表中的所有卡片
+        for i in range(self.result_layout.count()):
+            w = self.result_layout.itemAt(i).widget()
+            if w: w.update()
 
-    def animate_theme_transition(self, step):
-        if step > self.transition_steps:
-            self.is_transitioning = False
-            self.current_colors = self.target_colors.copy()
-            self.colors = self.current_colors
-            self.apply_theme_to_ui()
+        btn_bg = "#333" if is_dark else "#DDD"
+        btn_txt = "#FFF" if is_dark else "#333"
+        self.btn_refresh.setStyleSheet(f"QPushButton {{ background: {btn_bg}; color: {btn_txt}; border-radius: 4px; border: none; font-size: 11px; }} QPushButton:hover {{ background: #2D79FF; color: white; }}")
+        
+        if not self.is_model_valid: self.status_text.setStyleSheet("color: #FF453A; font-weight: bold;")
+        else: self.status_text.setStyleSheet("color: #30D158; font-weight: bold;")
+
+        self.anim_fade = QPropertyAnimation(self.transition_effect, b"opacity")
+        self.anim_fade.setDuration(350); self.anim_fade.setStartValue(1.0); self.anim_fade.setEndValue(0.0); self.anim_fade.setEasingCurve(QEasingCurve.InOutQuad)
+        self.anim_fade.finished.connect(self.transition_overlay.hide)
+        self.anim_fade.start()
+
+    def update_theme(self):
+        t = Theme.COLORS[Theme.CURRENT_MODE]
+        self.setStyleSheet(f"""
+            QMainWindow {{ background-color: {t['bg_main']}; }}
+            QWidget {{ color: {t['text_main']}; font-family: 'Segoe UI', 'Microsoft YaHei'; }}
+            QTextEdit {{ background-color: {t['input_bg']}; color: {t['text_main']}; border: 1px solid {t['border']}; border-radius: 12px; padding: 15px; font-size: 11pt; }}
+            QTextEdit:focus {{ border: 1px solid #2D79FF; }}
+            QSplitter::handle {{ background: transparent; }}
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollArea > QWidget > QWidget {{ background: transparent; }}
+        """)
+        self.title_lbl.setStyleSheet(f"font-size: 28px; font-weight: 900; color: {t['text_main']};")
+        self.label_input.setStyleSheet(f"color: {t['text_sub']}; font-weight: bold; margin-bottom: 5px;")
+        self.label_output.setStyleSheet(f"color: {t['text_sub']}; font-weight: bold; margin-top: 10px;")
+        card_style = f"QFrame {{ background-color: {t['bg_card']}; border: 1px solid {t['border']}; border-radius: 16px; }}"
+        self.card_input.setStyleSheet(card_style); self.card_output.setStyleSheet(card_style)
+        self.card_input.setGraphicsEffect(Theme.shadow(30)); self.card_output.setGraphicsEffect(Theme.shadow(30))
+        btn_bg = "#333" if Theme.CURRENT_MODE == 'dark' else "#DDD"; btn_txt = "#FFF" if Theme.CURRENT_MODE == 'dark' else "#333"
+        self.btn_refresh.setStyleSheet(f"QPushButton {{ background: {btn_bg}; color: {btn_txt}; border-radius: 4px; border: none; font-size: 11px; }} QPushButton:hover {{ background: #2D79FF; color: white; }}")
+
+    def resizeEvent(self, event):
+        if hasattr(self, 'transition_overlay') and self.transition_overlay.isVisible():
+            self.transition_overlay.setGeometry(0, 0, self.width(), self.height())
+        super().resizeEvent(event)
+
+    def clear_content(self):
+        self.input_edit.clear()
+        # 清空结果布局
+        while self.result_layout.count():
+            item = self.result_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        self.gauge.setValue(0); self.progress_bar.setValue(0)
+
+    def run_detection(self):
+        if not self.is_model_valid:
+            QMessageBox.critical(self, "无法运行", f"未检测到完整模型。\n{self.status_text.text()}\n请检查 AIGC_Model 文件夹。")
             return
-        factor = step / self.transition_steps
-        temp_colors = {}
-        for key in self.target_colors:
-            temp_colors[key] = self.interpolate_color(self.start_colors[key], self.target_colors[key], factor)
-        self.current_colors = temp_colors
-        self.colors = temp_colors
-        self.apply_theme_to_ui()
-        self.root.after(16, lambda: self.animate_theme_transition(step + 1))
+        text = self.input_edit.toPlainText().strip()
+        if not text:
+            self.btn_detect.setText("⚠️ 内容为空"); QTimer.singleShot(1500, lambda: self.btn_detect.setText("⚡ 开始深度检测")); return
+        self.btn_detect.setEnabled(False); self.btn_detect.setText("正在分析...")
+        
+        # 清空现有结果
+        while self.result_layout.count():
+            item = self.result_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+            
+        self.gauge.setValue(0); self.progress_bar.setValue(0)
+        self.thread = AIGCDetectionThread(text, self.model_path)
+        self.thread.status_signal.connect(lambda s: self.status_text.setText(s))
+        self.thread.progress_signal.connect(self.progress_bar.setValue)
+        self.thread.result_signal.connect(self.process_results)
+        self.thread.finished.connect(lambda: [self.btn_detect.setEnabled(True), self.btn_detect.setText("⚡ 开始深度检测"), self.status_text.setText("分析完成") if self.is_model_valid else None, self.progress_bar.setValue(100)])
+        self.thread.start()
 
-    def hex_to_rgb(self, hex_color):
-        hex_color = hex_color.lstrip('#')
-        return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+    def process_results(self, res):
+        if "error" in res: QMessageBox.critical(self, "检测中断", res["error"]); return
+        self.gauge.setValue(res["total_ai_rate"])
+        
+        # 动态创建卡片
+        delay_counter = 0
+        for p in res["paragraphs"]:
+            block = ResultBlock(p["content"], p["ai_rate"])
+            self.result_layout.addWidget(block)
+            
+            # 级联触发动画 (每个卡片延迟 150ms 触发)
+            block.start_reveal(delay_counter)
+            delay_counter += 150
+            
+        self.result_layout.addStretch() # 底部顶起
 
-    def rgb_to_hex(self, rgb):
-        return '#%02x%02x%02x' % tuple(map(int, rgb))
-
-    def interpolate_color(self, start_hex, end_hex, factor):
-        start_rgb = self.hex_to_rgb(start_hex)
-        end_rgb = self.hex_to_rgb(end_hex)
-        result_rgb = [start + (end - start) * factor for start, end in zip(start_rgb, end_rgb)]
-        return self.rgb_to_hex(result_rgb)
-
-    def apply_theme_to_ui(self):
-        self.root.configure(bg=self.colors["bg"])
-        self.top_bar.config(bg=self.colors["sidebar"])
-        self.logo_label.config(bg=self.colors["sidebar"], fg=self.colors["text"])
-        self.switch_frame.config(bg=self.colors["sidebar"])
-        self.mode_label.config(bg=self.colors["sidebar"], fg=self.colors["text_sub"])
-        self.status_text.config(bg=self.colors["sidebar"], fg=self.colors["text_sub"])
-        self.container.config(bg=self.colors["bg"])
-        self.left_col.config(bg=self.colors["bg"])
-        self.right_col.config(bg=self.colors["bg"])
-        self.scan_action_frame.config(bg=self.colors["bg"])
-        self.progress_container.config(bg=self.colors["bg"])
-        self.progress_bar_bg.config(bg=self.colors["gauge_bg"])
-        self.progress_bar_fill.config(bg=self.colors["accent"])
-        self.progress_percent_label.config(bg=self.colors["bg"], fg=self.colors["accent"])
-        self.editor_shadow.config(bg=self.colors["shadow"])
-        self.gauge_shadow.config(bg=self.colors["shadow"])
-        self.editor_card.config(highlightbackground=self.colors["border"])
-        self.gauge_card.config(bg=self.colors["card"], highlightbackground=self.colors["border"])
-        self.detail_label.config(bg=self.colors["bg"], fg=self.colors["text_sub"])
-        self.list_wrap.config(bg=self.colors["bg"])
-        self.results_canvas.config(bg=self.colors["bg"])
-        self.results_inner.config(bg=self.colors["bg"])
-        self.btn_import.update_theme(self.fixed_input_bg, color=self.colors["accent"])
-        self.btn_run.update_theme(self.colors["bg"], color=self.colors["accent"])
-        self.btn_reset.update_theme(self.colors["bg"], color=self.colors["reset"], text_color=self.colors["reset_text"])
-        self.draw_gauge(self.display_score)
-        self.refresh_tiles_theme()
-
-    def refresh_tiles_theme(self):
-        scale = self.get_scale()
-        for tile_shadow in self.results_inner.winfo_children():
-            tile_shadow.config(bg=self.colors["shadow"])
-            for tile in tile_shadow.winfo_children():
-                tile.config(bg=self.colors["card"], highlightbackground=self.colors["border"])
-                self._apply_styles_to_subwidgets(tile, scale)
-
-    def _apply_styles_to_subwidgets(self, widget, scale):
-        for child in widget.winfo_children():
-            if isinstance(child, tk.Label):
-                child.config(bg=self.colors["card"])
-                text = child.cget("text")
-                if "段落" in text:
-                    child.config(fg=self.colors["text_sub"], font=("Microsoft YaHei UI", int(9 * scale), "bold"))
-                elif "%" in text:
-                    child.config(font=("Helvetica", int(11 * scale), "bold"))
-            elif isinstance(child, tk.Frame):
-                if child.winfo_height() <= 15:
-                    child.config(bg=self.colors["gauge_bg"])
-                else:
-                    child.config(bg=self.colors["card"])
-                self._apply_styles_to_subwidgets(child, scale)
-
-    def on_resize(self, event):
-        if event.widget != self.root: return
-
-        # 使用 after 延迟执行，确保 Tkinter 已处理完布局改变
-        if self.resize_after_id:
-            self.root.after_cancel(self.resize_after_id)
-
-        def delayed_resize():
-            # 强制同步空闲任务，获取最新的组件物理尺寸
-            self.root.update_idletasks()
-
-            scale = self.get_scale()
-            self.text_input.config(font=("PingFang SC", int(15 * (scale ** 0.85))))
-            self.setup_text_tags()
-            self.btn_import.update_size(scale)
-            self.btn_run.update_size(scale)
-            self.btn_reset.update_size(scale)
-
-            # 更新结果列表宽度
-            canvas_w = self.results_canvas.winfo_width()
-            if canvas_w > 1:
-                self.results_canvas.itemconfig(self.results_window, width=canvas_w)
-
-            self.refresh_tiles_theme()
-            self.draw_gauge(self.display_score)
-            self.resize_after_id = None
-
-        self.resize_after_id = self.root.after(5, delayed_resize)
-
-    def import_document(self):
-        file_path = filedialog.askopenfilename(filetypes=[("文档文件", "*.txt *.docx")])
-        if file_path: self.load_file_to_editor(file_path)
-
-    def draw_gauge(self, score):
-        # 强制更新组件状态以获取最新物理尺寸
-        self.gauge_card.update_idletasks()
-
-        self.display_score = score
-        self.gauge_card.delete("all")
-
-        w = self.gauge_card.winfo_width()
-        h = self.gauge_card.winfo_height()
-
-        # 兼容性处理：如果组件尚未完全载入，提供默认参考值
-        if w <= 1 or h <= 1:
-            w, h = 440, 340
-
-        scale = self.get_scale()
-        cx, cy = w / 2, h / 2 + 30 * scale
-        r = min(w, h) * 0.32
-
-        # 底色圆弧
-        self.gauge_card.create_arc(cx - r, cy - r, cx + r, cy + r, start=-30, extent=240,
-                                   width=16 * scale, outline=self.colors["gauge_bg"], style="arc")
-
-        # 进度色圆弧
-        color = self.safe_color if score <= 30 else (self.warn_color if score <= 70 else self.danger_color)
-        if score > 0:
-            self.gauge_card.create_arc(cx - r, cy - r, cx + r, cy + r, start=210, extent=-(score / 100) * 240,
-                                       width=16 * scale, outline=color, style="arc")
-
-        # 文字渲染
-        font_size = int(min(r * 0.5, 54 * (scale ** 0.6)))
-        self.gauge_card.create_text(cx, cy - 15 * scale, text=f"{int(score)}%",
-                                    font=("Helvetica", font_size, "bold"), fill=self.colors["text"])
-        self.gauge_card.create_text(cx, cy + 45 * scale, text="AI 生成概率",
-                                    font=("Microsoft YaHei UI", int(max(9, 10 * scale)), "bold"),
-                                    fill=self.colors["text_sub"])
-
-    def animate_gauge(self, target):
-        if self.gauge_anim_id:
-            self.root.after_cancel(self.gauge_anim_id)
-            self.gauge_anim_id = None
-
-        self.target_score = target
-        diff = target - self.display_score
-        if abs(diff) > 0.05:
-            self.display_score += diff * 0.1
-            self.draw_gauge(self.display_score)
-            self.gauge_anim_id = self.root.after(16, lambda: self.animate_gauge(target))
-        else:
-            self.draw_gauge(target)
-            self.gauge_anim_id = None
-
-    def reset_interface(self):
-        if self.analysis_running: return
-        if self.gauge_anim_id:
-            self.root.after_cancel(self.gauge_anim_id)
-            self.gauge_anim_id = None
-
-        self.text_input.delete("1.0", tk.END)
-        for child in self.results_inner.winfo_children():
-            child.destroy()
-
-        self.results_canvas.yview_moveto(0)
-        self.animate_gauge(0)
-        self.status_text.config(text="系统就绪", fg=self.colors["text_sub"])
-
-        self.progress_container.pack_forget()
-        self.progress_bar_fill.config(width=0)
-        self.progress_percent_label.config(text="0%")
-
-    def add_result_tile(self, index, target_score):
-        scale = self.get_scale()
-        color = self.safe_color if target_score <= 30 else (
-            self.warn_color if target_score <= 70 else self.danger_color)
-
-        tile_shadow = tk.Frame(self.results_inner, bg=self.colors["shadow"], padx=1, pady=1)
-        tile_shadow.pack(fill="x", pady=10, padx=2)
-
-        tile = tk.Frame(tile_shadow, bg=self.colors["card"], highlightthickness=1,
-                        highlightbackground=self.colors["border"], padx=20, pady=16, cursor="hand2")
-        tile.pack(fill="both", expand=True)
-
-        tile.state = {"anim_val": 0.0, "target_val": 0.0, "is_animating": False, "trans_id": None}
-
-        def run_transition():
-            diff = tile.state["target_val"] - tile.state["anim_val"]
-            if abs(diff) > 0.01:
-                tile.state["anim_val"] += diff * 0.2
-                v = tile.state["anim_val"]
-                pad_x = 2 - int(v * 4)
-                tile_shadow.pack_configure(padx=(max(0, pad_x), max(0, pad_x)))
-                current_border = self.interpolate_color(self.colors["border"], self.colors["accent"], v)
-                tile.config(highlightbackground=current_border)
-                tile.state["trans_id"] = self.root.after(10, run_transition)
-            else:
-                tile.state["anim_val"] = tile.state["target_val"]
-                tile.state["is_animating"] = False
-                tile.state["trans_id"] = None
-
-        def on_enter(e):
-            if tile.state["trans_id"]: self.root.after_cancel(tile.state["trans_id"])
-            tile.state["target_val"] = 1.0
-            tile.state["is_animating"] = True
-            run_transition()
-
-        def on_leave(e):
-            if tile.state["trans_id"]: self.root.after_cancel(tile.state["trans_id"])
-            tile.state["target_val"] = 0.0
-            tile.state["is_animating"] = True
-            run_transition()
-
-        def on_press(e):
-            tile_shadow.pack_configure(padx=6)
-
-        def on_release(e):
-            tile_shadow.pack_configure(padx=2)
-
-        header = tk.Frame(tile, bg=self.colors["card"])
-        header.pack(fill="x")
-
-        tk.Label(header, text=f"段落 {index:02d}", font=("Microsoft YaHei UI", int(9 * scale), "bold"),
-                 fg=self.colors["text_sub"], bg=self.colors["card"]).pack(side="left")
-
-        score_label = tk.Label(header, text="0.0%", font=("Helvetica", int(11 * scale), "bold"),
-                               fg=color, bg=self.colors["card"])
-        score_label.pack(side="right")
-
-        pb_bg = tk.Frame(tile, bg=self.colors["gauge_bg"], height=int(6 * scale))
-        pb_bg.pack(fill="x", pady=(12, 0))
-
-        pb_fill = tk.Frame(pb_bg, bg=color, height=int(6 * scale))
-        pb_fill.place(relx=0, rely=0, relwidth=0)
-
-        def bind_tree(w):
-            w.bind("<Enter>", on_enter, add="+")
-            w.bind("<Leave>", on_leave, add="+")
-            w.bind("<Button-1>", on_press, add="+")
-            w.bind("<ButtonRelease-1>", on_release, add="+")
-            for child in w.winfo_children(): bind_tree(child)
-
-        bind_tree(tile)
-        self.animate_tile_progress(pb_fill, score_label, 0, target_score)
-
-    def animate_tile_progress(self, fill_widget, label_widget, current, target):
+    def handle_file_content(self, path):
         try:
-            if current < target:
-                current += max(0.4, (target - current) * 0.1)
-                fill_widget.place(relwidth=max(0.01, current / 100))
-                label_widget.config(text=f"{current:.1f}%")
-                self.root.after(20, lambda: self.animate_tile_progress(fill_widget, label_widget, current, target))
-        except tk.TclError:
-            pass
+            ext = os.path.splitext(path)[1].lower()
+            content = ""
+            if ext == '.txt':
+                with open(path, 'rb') as f: raw = f.read()
+                encoding = chardet.detect(raw)['encoding'] if HAS_CHARDET and chardet.detect(raw)['confidence'] > 0.6 else 'utf-8'
+                try: content = raw.decode(encoding)
+                except: content = raw.decode('utf-8', errors='ignore')
+            elif ext == '.docx':
+                if not HAS_DOCX: QMessageBox.warning(self, "组件缺失", "请安装 python-docx"); return
+                doc = docx.Document(path); content = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
+            self.input_edit.setPlainText(content); self.status_text.setText(f"已加载: {os.path.basename(path)}")
+        except Exception as e: QMessageBox.critical(self, "错误", f"读取失败: {str(e)}")
 
-    def update_scan_progress(self, current, total):
-        try:
-            percent = (current / total) * 100
-            self.progress_percent_label.config(text=f"{int(percent)}%")
-            bar_width = self.progress_bar_bg.winfo_width()
-            target_width = int(bar_width * (percent / 100))
-            self.progress_bar_fill.config(width=target_width)
-        except:
-            pass
-
-    def load_model(self):
-        try:
-            self.tokenizer = AutoTokenizer.from_pretrained(LOCAL_MODEL_PATH)
-            self.model = AutoModelForSequenceClassification.from_pretrained(LOCAL_MODEL_PATH)
-            self.model.to(self.device).eval()
-            self.is_ready = True
-            self.root.after(0, lambda: self.status_text.config(text="系统已激活", fg=self.safe_color))
-        except:
-            pass
-
-    def start_analysis(self):
-        if not self.is_ready or self.analysis_running: return
-        text = self.text_input.get("1.0", tk.END).strip()
-        if len(text) < 10: return
-
-        self.analysis_running = True
-        self.btn_run.set_text("扫描中...")
-        self.btn_run.set_state(disabled=True)
-        self.status_text.config(text="正在深度扫描...", fg=self.colors["accent"])
-
-        self.progress_container.pack(fill="x", pady=(0, 10))
-        self.progress_bar_fill.config(width=0)
-        self.progress_percent_label.config(text="0%")
-
-        for child in self.results_inner.winfo_children(): child.destroy()
-        for tag in self.text_input.tag_names():
-            if tag.startswith("para_") or tag == "active_para":
-                self.text_input.tag_remove(tag, "1.0", tk.END)
-
-        threading.Thread(target=self.run_inference, args=(text,), daemon=True).start()
-
-    def run_inference(self, text):
-        paragraphs = [p.strip() for p in re.split(r'[\r\n]+', text) if len(p.strip()) > 5]
-        total = len(paragraphs)
-        scored_data = []
-
-        for i, p in enumerate(paragraphs):
-            if not self.analysis_running: return
-
-            inputs = self.tokenizer(p, return_tensors="pt", truncation=True, max_length=512).to(self.device)
-            with torch.no_grad():
-                outputs = self.model(**inputs)
-                prob = round(torch.softmax(outputs.logits, dim=-1)[0][1].item() * 100, 1)
-            scored_data.append((p, prob))
-
-            self.root.after(0, self.update_scan_progress, i + 1, total)
-            self.root.after(i * 100, self.add_result_tile, i + 1, prob)
-
-        avg_score = sum(p[1] for p in scored_data) / len(scored_data) if scored_data else 0
-        self.root.after(len(paragraphs) * 100 + 300, lambda: self.finish_analysis(avg_score, scored_data))
-
-    def finish_analysis(self, score, scored_data):
-        self.analysis_running = False
-        self.animate_gauge(score)
-
-        self.btn_run.set_text("立即开始扫描")
-        self.btn_run.set_state(disabled=False)
-        self.progress_container.pack_forget()
-
-        self.status_text.config(text="分析已完成", fg=self.colors["text_sub"])
-        self.text_input.delete("1.0", tk.END)
-
-        for i, (text, prob) in enumerate(scored_data):
-            para_tag = f"para_{i + 1}"
-            self.text_input.insert(tk.END, text + " ", para_tag)
-            prob_tag = "safe_tag" if prob <= 30 else ("warn_tag" if prob <= 70 else "danger_tag")
-            self.text_input.insert(tk.END, f"【AI 概率: {prob}%】", (para_tag, prob_tag))
-            self.text_input.insert(tk.END, "\n\n")
-
-    def get_scale(self):
-        current_w = self.root.winfo_width()
-        return max(0.9, current_w / self.ref_width)
-
+    def import_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "打开文档", "", "Text/Word (*.txt *.docx)")
+        if path: self.handle_file_content(path)
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = AIGCDetectorPro(root)
-    root.mainloop()
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+    app = QApplication(sys.argv); app.setStyle("Fusion")
+    font = QFont("Microsoft YaHei", 10); font.setStyleStrategy(QFont.PreferAntialias); app.setFont(font)
+    window = AIGCSentinel(); window.show(); sys.exit(app.exec())
