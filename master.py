@@ -4,6 +4,7 @@ import torch
 import random
 import math
 import time
+import html
 
 # --- 依赖库安全导入 ---
 try:
@@ -22,17 +23,18 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QPushButton,
     QVBoxLayout, QHBoxLayout, QWidget, QLabel, QFrame,
     QFileDialog, QMessageBox, QSplitter, QGraphicsDropShadowEffect,
-    QProgressBar, QSizePolicy, QSpacerItem
+    QProgressBar, QSizePolicy, QSpacerItem, QGraphicsOpacityEffect,
+    QScrollArea
 )
 from PySide6.QtCore import (
     Qt, Signal, QThread, QSize, Property, QPropertyAnimation, 
     QEasingCurve, QRectF, QPointF, QParallelAnimationGroup, QTimer,
-    QAbstractAnimation
+    QAbstractAnimation, QByteArray, QSequentialAnimationGroup
 )
 from PySide6.QtGui import (
     QColor, QLinearGradient, QPainter, QFont, QTextCursor, 
     QTextCharFormat, QPen, QPolygonF, QBrush, QPalette, QIcon, QRadialGradient,
-    QPainterPath
+    QPainterPath, QPixmap, QTransform, QFontMetrics
 )
 
 # ---------------------- 核心配色与状态管理 ----------------------
@@ -71,6 +73,7 @@ class Theme:
     ACCENT_GREEN = "#00E070"
     ACCENT_RED = "#FF453A"
     ACCENT_YELLOW = "#FFD60A"
+    ACCENT_BLUE = "#2D79FF"
 
     @classmethod
     def get(cls, key):
@@ -223,15 +226,233 @@ class AIGCGaugeWidget(QWidget):
         p.setBrush(QBrush(pointer_c)); p.setPen(Qt.NoPen); p.drawPolygon(QPolygonF([QPointF(-6, 0), QPointF(6, 0), QPointF(0, -98)]))
         p.setBrush(QBrush(QColor(Theme.get('bg_card')))); p.setPen(QPen(pointer_c, 3)); p.drawEllipse(-8, -8, 16, 16); p.restore()
 
+# ---------------------- 交互增强组件 ----------------------
+
 class DragTextEdit(QTextEdit):
+    """
+    具有吸附和发光动效的编辑器
+    """
     file_dropped = Signal(str)
-    def __init__(self, parent=None): super().__init__(parent); self.setAcceptDrops(True)
-    def dragEnterEvent(self, e): e.accept() if e.mimeData().hasUrls() else e.ignore()
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setPlaceholderText("在此处粘贴文本或拖入文件...")
+        
+        self._glow_strength = 0.0 # 0.0 - 1.0
+        self._scale_factor = 1.0  # 1.0 - 1.02
+        
+        self.anim_glow = QPropertyAnimation(self, b"glow_strength", self)
+        self.anim_glow.setDuration(300)
+        self.anim_glow.setEasingCurve(QEasingCurve.OutQuad)
+        
+        self.anim_scale = QPropertyAnimation(self, b"scale_factor", self)
+        self.anim_scale.setDuration(300)
+        self.anim_scale.setEasingCurve(QEasingCurve.OutBack)
+
+    @Property(float)
+    def glow_strength(self): return self._glow_strength
+    @glow_strength.setter
+    def glow_strength(self, v): self._glow_strength = v; self.update()
+
+    @Property(float)
+    def scale_factor(self): return self._scale_factor
+    @scale_factor.setter
+    def scale_factor(self, v): self._scale_factor = v; self.update()
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.accept()
+            self.anim_glow.stop(); self.anim_glow.setEndValue(1.0); self.anim_glow.start()
+            self.anim_scale.stop(); self.anim_scale.setEndValue(1.02); self.anim_scale.start()
+        else: e.ignore()
+
+    def dragLeaveEvent(self, e):
+        self.anim_glow.stop(); self.anim_glow.setEndValue(0.0); self.anim_glow.start()
+        self.anim_scale.stop(); self.anim_scale.setEndValue(1.0); self.anim_scale.start()
+        super().dragLeaveEvent(e)
+
     def dropEvent(self, e):
+        self.anim_glow.stop(); self.anim_glow.setEndValue(0.0); self.anim_glow.start()
+        self.anim_scale.stop(); self.anim_scale.setEndValue(1.0); self.anim_scale.start()
         urls = e.mimeData().urls()
         if urls:
             path = urls[0].toLocalFile()
             if os.path.splitext(path)[1].lower() in ['.txt', '.docx']: self.file_dropped.emit(path)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._glow_strength > 0.01:
+            p = QPainter(self.viewport())
+            p.setRenderHint(QPainter.Antialiasing)
+            glow_c = QColor(Theme.ACCENT_BLUE)
+            glow_c.setAlpha(int(150 * self._glow_strength))
+            path = QPainterPath()
+            path.addRoundedRect(self.viewport().rect().adjusted(2,2,-2,-2), 8, 8)
+            p.setPen(QPen(glow_c, 4 * self._glow_strength))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
+
+class ResultBlock(QWidget):
+    """
+    单个结果段落卡片 - 侧滑版
+    特性：
+    1. 无遮挡：移除了侧滑信息卡
+    2. 内联标签：AI率直接追加在文字末尾
+    3. 侧滑入场：从右侧平滑滑入
+    """
+    def __init__(self, content, ai_rate, parent=None):
+        super().__init__(parent)
+        self.content = content
+        self.ai_rate = ai_rate
+        self.setFixedHeight(0) # 初始高度0
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        
+        # 1. 颜色判定
+        if ai_rate < 30: 
+            self.accent_color = Theme.ACCENT_GREEN
+            self.verdict = "人类创作"
+        elif ai_rate < 60: 
+            self.accent_color = Theme.ACCENT_YELLOW
+            self.verdict = "疑似混写"
+        else: 
+            self.accent_color = Theme.ACCENT_RED
+            self.verdict = "疑似生成"
+
+        # 2. 内部容器 (用于实现整体内容的位移动画)
+        # 我们不直接在 paintEvent 里移动 Painter，而是移动这个内部 Widget
+        self.content_widget = QWidget(self)
+        self.content_widget.move(100, 0) # 初始位置偏移
+
+        # 3. 布局
+        self.layout = QVBoxLayout(self.content_widget)
+        self.layout.setContentsMargins(15, 12, 15, 12)
+        
+        # 文本标签 (RichText)
+        self.text_label = QLabel("")
+        self.text_label.setWordWrap(True)
+        self.text_label.setStyleSheet(f"color: {Theme.get('text_sub')}; font-size: 11pt; line-height: 1.6;")
+        self.text_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.text_label.setTextFormat(Qt.RichText) # 启用富文本
+        
+        self.layout.addWidget(self.text_label)
+
+        # 4. 动画状态
+        self._typewriter_idx = 0
+        self._opacity = 0.0
+        self._slide_offset_x = 80.0 # 初始向右偏移 80px
+
+        self.anim_entry = QPropertyAnimation(self, b"entry_val", self)
+        self.anim_entry.setDuration(700)
+        self.anim_entry.setEasingCurve(QEasingCurve.OutCubic)
+        
+        self.timer_type = QTimer(self)
+        self.timer_type.setInterval(5) # 打字速度
+
+        # 连接打字机信号
+        self.timer_type.timeout.connect(self._step_typewriter)
+
+    @Property(float)
+    def entry_val(self): return self._opacity
+    @entry_val.setter
+    def entry_val(self, v):
+        self._opacity = v
+        # 动画逻辑：v 从 0 -> 1
+        # slide_offset 从 80 -> 0 (从右向左滑)
+        self._slide_offset_x = 80.0 * (1.0 - v)
+        
+        # 更新内部容器位置
+        self.content_widget.move(int(self._slide_offset_x), 0)
+        self.update() # 触发重绘更新透明度
+
+    def start_reveal(self, delay=0):
+        QTimer.singleShot(delay, self._begin)
+
+    def _begin(self):
+        # 1. 计算所需高度 (包含即将追加的 Tag)
+        tag_preview = f"  [AI: {int(self.ai_rate)}%]"
+        full_text_preview = self.content + tag_preview
+        
+        # 使用 QFontMetrics 精确计算
+        available_w = max(100, self.width() - 30) # 减去 padding
+        font = self.text_label.font()
+        fm = QFontMetrics(font)
+        rect = fm.boundingRect(0, 0, available_w, 10000, Qt.TextWordWrap | Qt.AlignLeft, full_text_preview)
+        
+        target_h = rect.height() + 35 # 增加一点垂直缓冲
+        
+        self.setFixedHeight(target_h)
+        self.content_widget.resize(self.width(), target_h)
+        
+        # 2. 启动入场动画
+        self.anim_entry.setStartValue(0.0)
+        self.anim_entry.setEndValue(1.0)
+        self.anim_entry.start()
+        
+        # 3. 启动打字机
+        self.timer_type.start()
+
+    def _step_typewriter(self):
+        batch = 6 # 每次显示6个字符，加快一点
+        self._typewriter_idx += batch
+        
+        # 获取当前显示的纯文本
+        current_plain = self.content[:self._typewriter_idx]
+        escaped_text = html.escape(current_plain)
+        self.text_label.setText(escaped_text)
+        
+        if self._typewriter_idx >= len(self.content):
+            self.timer_type.stop()
+            # 打字结束，追加带有颜色的 AI 标签
+            final_plain = html.escape(self.content)
+            
+            # 获取颜色 Hex
+            c = QColor(self.accent_color)
+            color_hex = c.name() 
+            
+            # 构造 HTML
+            tag_html = f"&nbsp;&nbsp;<span style='color:{color_hex}; font-weight:bold; font-size:10pt;'>[AI: {int(self.ai_rate)}% | {self.verdict}]</span>"
+            self.text_label.setText(final_plain + tag_html)
+
+    def paintEvent(self, event):
+        # 绘制背景
+        if self._opacity > 0:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setOpacity(self._opacity)
+            
+            # 这里的坐标系是 ResultBlock 的，我们需要根据 content_widget 的位置来绘图吗？
+            # 不，我们直接绘制在 ResultBlock 上，但是位置要跟 content_widget 一致，或者直接变换坐标系
+            # 为了简单，我们手动加上 _slide_offset_x
+            
+            trans = QTransform()
+            trans.translate(self._slide_offset_x, 0)
+            p.setTransform(trans)
+            
+            # 背景色
+            bg_c = QColor(Theme.get('input_bg'))
+            # 稍微加深高风险段落的背景
+            if self.ai_rate > 60:
+                bg_c = QColor(Theme.ACCENT_RED)
+                bg_c.setAlpha(15) 
+            
+            p.setBrush(bg_c)
+            p.setPen(Qt.NoPen)
+            # 留出一点边距
+            draw_rect = self.rect().adjusted(5, 2, -5, -2)
+            p.drawRoundedRect(draw_rect, 8, 8)
+            
+            # 左侧装饰线
+            line_c = QColor(self.accent_color)
+            line_c.setAlpha(180)
+            p.setBrush(line_c)
+            p.drawRoundedRect(QRectF(5, 10, 3, self.height()-20), 1.5, 1.5)
+
+    def resizeEvent(self, event):
+        # 保持内部容器宽度同步
+        self.content_widget.resize(self.width(), self.height())
+        super().resizeEvent(event)
+
 
 # ---------------------- 核心检测线程 ----------------------
 class AIGCDetectionThread(QThread):
@@ -255,7 +476,6 @@ class AIGCDetectionThread(QThread):
             self.progress_signal.emit(10)
             
             self.status_signal.emit("加载本地权重 (config, bin, vocab)...")
-            # 这里会自动读取 config.json, pytorch_model.bin, vocab.txt 等所有相关文件
             tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
             model = AutoModelForSequenceClassification.from_pretrained(self.model_path, local_files_only=True)
             detector = pipeline("text-classification", model=model, tokenizer=tokenizer, device=device)
@@ -277,23 +497,11 @@ class AIGCDetectionThread(QThread):
                     label = inference['label'].lower()
                     score = inference['score']
                     
-                    # --- 修复关键逻辑 ---
-                    # 很多模型的 AI 标签是 "LABEL_1"，或者 "1"
-                    # 原来的代码漏掉了 '1'，导致 LABEL_1 (AI) 被判定为非关键词
-                    # 结果变成了 ai_rate = (1 - score)，即 99% 变成了 1%
-                    
-                    # 现在的逻辑：只要标签包含 fake, ai, chatgpt, generated, 1, label_1 任意一个，就认为是 AI 标签
                     is_ai_label = any(x in label for x in ['fake', 'ai', 'chatgpt', 'generated', '1', 'label_1'])
-                    
-                    # 如果是 AI 标签，概率就是 score；如果不是(如 label_0)，概率是 1-score (假设 score 是 label_0 的置信度，这通常不常见)
-                    # 通常 Binary Classification 输出 label_0 (Human) 或 label_1 (AI)
-                    # 如果输出 label_1, score=0.99 -> ai_rate=99
-                    # 如果输出 label_0, score=0.99 -> 这是 Human 的概率 -> ai_rate = 100 - 99 = 1
                     
                     if is_ai_label:
                         ai_rate = round(score * 100, 2)
                     else:
-                        # 标签是 Human/Real/0
                         ai_rate = round((1 - score) * 100, 2)
                     
                     results.append({"content": para, "ai_rate": ai_rate})
@@ -319,6 +527,14 @@ class AIGCSentinel(QMainWindow):
         self.resize(1300, 850)
         self.is_model_valid = False
         self.model_path = ""
+        
+        # 转场动画覆盖层
+        self.transition_overlay = QLabel(self)
+        self.transition_overlay.hide()
+        self.transition_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.transition_effect = QGraphicsOpacityEffect(self.transition_overlay)
+        self.transition_overlay.setGraphicsEffect(self.transition_effect)
+        
         self.init_ui(); self.update_theme(); self.check_model_status() 
 
     def init_ui(self):
@@ -344,14 +560,25 @@ class AIGCSentinel(QMainWindow):
         splitter = QSplitter(Qt.Horizontal); splitter.setHandleWidth(20)
         self.card_input = QFrame(); in_layout = QVBoxLayout(self.card_input)
         self.label_input = QLabel("📝 原文输入 (支持 .txt / .docx 拖入)"); self.label_input.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
-        self.input_edit = DragTextEdit(); self.input_edit.setPlaceholderText("在此处粘贴文本或拖入文件..."); self.input_edit.file_dropped.connect(self.handle_file_content)
+        self.input_edit = DragTextEdit(); self.input_edit.file_dropped.connect(self.handle_file_content)
         in_layout.addWidget(self.label_input); in_layout.addWidget(self.input_edit)
 
+        # --- 结果区域改造：QScrollArea ---
         self.card_output = QFrame(); out_layout = QVBoxLayout(self.card_output)
         self.gauge = AIGCGaugeWidget()
         self.label_output = QLabel("🔍 逐段溯源分析"); self.label_output.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        self.output_view = QTextEdit(); self.output_view.setReadOnly(True)
-        out_layout.addWidget(self.gauge); out_layout.addWidget(self.label_output); out_layout.addWidget(self.output_view); out_layout.setStretch(2, 3)
+        
+        # 结果滚动区
+        self.result_scroll = QScrollArea()
+        self.result_scroll.setWidgetResizable(True)
+        self.result_scroll.setFrameShape(QFrame.NoFrame)
+        self.result_container = QWidget()
+        self.result_layout = QVBoxLayout(self.result_container)
+        self.result_layout.setAlignment(Qt.AlignTop)
+        self.result_layout.setSpacing(15)
+        self.result_scroll.setWidget(self.result_container)
+        
+        out_layout.addWidget(self.gauge); out_layout.addWidget(self.label_output); out_layout.addWidget(self.result_scroll); out_layout.setStretch(2, 3)
 
         splitter.addWidget(self.card_input); splitter.addWidget(self.card_output); splitter.setSizes([600, 500])
         layout.addWidget(splitter, stretch=1)
@@ -381,7 +608,6 @@ class AIGCSentinel(QMainWindow):
 
         try:
             files = os.listdir(target_dir)
-            # 严格检查你提到的所有文件，让你放心
             has_config = "config.json" in files
             has_bin = "pytorch_model.bin" in files or "model.safetensors" in files
             has_vocab = "vocab.txt" in files
@@ -389,8 +615,6 @@ class AIGCSentinel(QMainWindow):
             if has_config and has_bin:
                 self.is_model_valid = True
                 self.model_path = target_dir
-                
-                # 在提示文本里明确显示已检测到的文件类型，让你知道 vocab 也被检测到了
                 status_str = "本地引擎已加载"
                 if has_vocab: status_str += " | Vocab 字典已载入"
                 
@@ -412,12 +636,38 @@ class AIGCSentinel(QMainWindow):
         self.status_text.setText(f"⚠️ 无法检测: {reason}"); self.status_text.setStyleSheet("color: #FF453A; font-weight: bold;")
 
     def toggle_theme(self, is_dark):
-        Theme.toggle(); self.update_theme()
-        self.gauge.update(); self.btn_import.update(); self.btn_clear.update(); self.btn_detect.update(); self.progress_bar.update()
-        btn_bg = "#333" if is_dark else "#DDD"; btn_txt = "#FFF" if is_dark else "#333"
+        pixmap = self.grab()
+        self.transition_overlay.setPixmap(pixmap)
+        self.transition_overlay.setGeometry(0, 0, self.width(), self.height())
+        self.transition_overlay.show()
+        self.transition_effect.setOpacity(1.0)
+        
+        Theme.toggle()
+        self.update_theme()
+        
+        self.gauge.update()
+        self.btn_import.update()
+        self.btn_clear.update()
+        self.btn_detect.update()
+        self.progress_bar.update()
+        self.input_edit.update() # 刷新输入框
+        
+        # 刷新结果列表中的所有卡片
+        for i in range(self.result_layout.count()):
+            w = self.result_layout.itemAt(i).widget()
+            if w: w.update()
+
+        btn_bg = "#333" if is_dark else "#DDD"
+        btn_txt = "#FFF" if is_dark else "#333"
         self.btn_refresh.setStyleSheet(f"QPushButton {{ background: {btn_bg}; color: {btn_txt}; border-radius: 4px; border: none; font-size: 11px; }} QPushButton:hover {{ background: #2D79FF; color: white; }}")
+        
         if not self.is_model_valid: self.status_text.setStyleSheet("color: #FF453A; font-weight: bold;")
         else: self.status_text.setStyleSheet("color: #30D158; font-weight: bold;")
+
+        self.anim_fade = QPropertyAnimation(self.transition_effect, b"opacity")
+        self.anim_fade.setDuration(350); self.anim_fade.setStartValue(1.0); self.anim_fade.setEndValue(0.0); self.anim_fade.setEasingCurve(QEasingCurve.InOutQuad)
+        self.anim_fade.finished.connect(self.transition_overlay.hide)
+        self.anim_fade.start()
 
     def update_theme(self):
         t = Theme.COLORS[Theme.CURRENT_MODE]
@@ -427,6 +677,8 @@ class AIGCSentinel(QMainWindow):
             QTextEdit {{ background-color: {t['input_bg']}; color: {t['text_main']}; border: 1px solid {t['border']}; border-radius: 12px; padding: 15px; font-size: 11pt; }}
             QTextEdit:focus {{ border: 1px solid #2D79FF; }}
             QSplitter::handle {{ background: transparent; }}
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollArea > QWidget > QWidget {{ background: transparent; }}
         """)
         self.title_lbl.setStyleSheet(f"font-size: 28px; font-weight: 900; color: {t['text_main']};")
         self.label_input.setStyleSheet(f"color: {t['text_sub']}; font-weight: bold; margin-bottom: 5px;")
@@ -437,8 +689,18 @@ class AIGCSentinel(QMainWindow):
         btn_bg = "#333" if Theme.CURRENT_MODE == 'dark' else "#DDD"; btn_txt = "#FFF" if Theme.CURRENT_MODE == 'dark' else "#333"
         self.btn_refresh.setStyleSheet(f"QPushButton {{ background: {btn_bg}; color: {btn_txt}; border-radius: 4px; border: none; font-size: 11px; }} QPushButton:hover {{ background: #2D79FF; color: white; }}")
 
+    def resizeEvent(self, event):
+        if hasattr(self, 'transition_overlay') and self.transition_overlay.isVisible():
+            self.transition_overlay.setGeometry(0, 0, self.width(), self.height())
+        super().resizeEvent(event)
+
     def clear_content(self):
-        self.input_edit.clear(); self.output_view.clear(); self.gauge.setValue(0); self.progress_bar.setValue(0)
+        self.input_edit.clear()
+        # 清空结果布局
+        while self.result_layout.count():
+            item = self.result_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        self.gauge.setValue(0); self.progress_bar.setValue(0)
 
     def run_detection(self):
         if not self.is_model_valid:
@@ -447,7 +709,14 @@ class AIGCSentinel(QMainWindow):
         text = self.input_edit.toPlainText().strip()
         if not text:
             self.btn_detect.setText("⚠️ 内容为空"); QTimer.singleShot(1500, lambda: self.btn_detect.setText("⚡ 开始深度检测")); return
-        self.btn_detect.setEnabled(False); self.btn_detect.setText("正在分析..."); self.output_view.clear(); self.gauge.setValue(0); self.progress_bar.setValue(0)
+        self.btn_detect.setEnabled(False); self.btn_detect.setText("正在分析...")
+        
+        # 清空现有结果
+        while self.result_layout.count():
+            item = self.result_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+            
+        self.gauge.setValue(0); self.progress_bar.setValue(0)
         self.thread = AIGCDetectionThread(text, self.model_path)
         self.thread.status_signal.connect(lambda s: self.status_text.setText(s))
         self.thread.progress_signal.connect(self.progress_bar.setValue)
@@ -458,16 +727,18 @@ class AIGCSentinel(QMainWindow):
     def process_results(self, res):
         if "error" in res: QMessageBox.critical(self, "检测中断", res["error"]); return
         self.gauge.setValue(res["total_ai_rate"])
-        cursor = self.output_view.textCursor()
+        
+        # 动态创建卡片
+        delay_counter = 0
         for p in res["paragraphs"]:
-            rate = p["ai_rate"]
-            color = "#00E070" if rate < 30 else "#FFD60A" if rate < 60 else "#FF453A"
-            fmt_text = QTextCharFormat(); fmt_text.setForeground(QColor(Theme.get('text_sub'))); fmt_text.setFontPointSize(10)
-            text_preview = p["content"][:150] + ("..." if len(p["content"]) > 150 else "")
-            cursor.insertText(text_preview, fmt_text)
-            fmt_tag = QTextCharFormat(); fmt_tag.setForeground(QColor(color)); fmt_tag.setFontWeight(QFont.Bold)
-            cursor.insertText(f"\n[AI 指数: {rate}%]\n\n", fmt_tag)
-        self.output_view.moveCursor(QTextCursor.Start)
+            block = ResultBlock(p["content"], p["ai_rate"])
+            self.result_layout.addWidget(block)
+            
+            # 级联触发动画 (每个卡片延迟 150ms 触发)
+            block.start_reveal(delay_counter)
+            delay_counter += 150
+            
+        self.result_layout.addStretch() # 底部顶起
 
     def handle_file_content(self, path):
         try:
