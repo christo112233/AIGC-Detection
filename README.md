@@ -42,5 +42,7 @@ venv\Scripts\activate
 # 3. 一键安装依赖（国内镜像加速）
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
+# 4. 运行main.py主程序
+
 
 
