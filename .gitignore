@@ -1,0 +1,36 @@
+# VSCode配置文件（重点过滤）
+.vscode/
+*.code-workspace
+
+# Python缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+venv/
+env/
+ENV/
+*.env
+
+# 打包产物
+dist/
+build/
+*.exe
+*.whl
+*.egg-info/
+
+# 日志/临时文件
+*.log
+tmp/
+temp/
+
+# 系统隐藏文件
+.DS_Store  # Mac系统
+Thumbs.db  # Windows系统
+
+# 过滤AIGC_Model文件夹里的所有文件/子文件夹
+AIGC_Model/*
+# 例外：保留.gitkeep文件（用于让Git追踪空文件夹）
+!AIGC_Model/.gitkeep
