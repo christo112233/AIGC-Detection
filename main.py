@@ -5,6 +5,7 @@ import random
 import math
 import time
 import html
+import re  # 新增正则库用于分句
 
 # --- 核心修复：防止 PyInstaller --noconsole 模式下 transformers 报错 ---
 class NullWriter:
@@ -470,19 +471,52 @@ class ResultBlock(QWidget):
         super().resizeEvent(event)
 
 
-# ---------------------- 核心检测线程 ----------------------
+# ---------------------- 核心检测线程 (引入特征校正) ----------------------
 class AIGCDetectionThread(QThread):
     progress_signal = Signal(int)
     result_signal = Signal(dict)
     status_signal = Signal(str)
-    device_signal = Signal(str, bool) # 硬件信息信号
+    device_signal = Signal(str, bool)
 
     def __init__(self, text, model_path):
         super().__init__()
         self.text = text
         self.model_path = model_path
         self.MIN_VALID_CHARS = 10
-        self.TEMPERATURE = 1.8 
+        self.TEMPERATURE = 2.0 # 增大温度系数：使概率分布更平滑
+        self.POWER_FACTOR = 3.5 # 增大指数惩罚：强力压制非确信结果
+
+    def calculate_human_features(self, text):
+        """
+        计算人工特征奖励分 (0.0 - 0.3)
+        基于：句子长度方差（突发性 Burstiness）
+        """
+        # 1. 简单分句 (中英文标点)
+        sentences = re.split(r'[。.!！?？;；\n]+', text)
+        sentences = [s for s in sentences if len(s.strip()) > 3] # 过滤过短碎片
+        
+        if len(sentences) < 3:
+            return 0.0 # 句子太少，特征不明显
+            
+        # 2. 计算长度统计量
+        lengths = [len(s) for s in sentences]
+        mean_len = sum(lengths) / len(lengths)
+        variance = sum((l - mean_len) ** 2 for l in lengths) / len(lengths)
+        std_dev = math.sqrt(variance)
+        
+        # 3. 变异系数 (CV) = 标准差 / 均值
+        # AI 生成的文本通常 CV 较低（节奏单一）
+        # 人类文本通常 CV 较高（长短句交替，节奏感强）
+        cv = std_dev / (mean_len + 1e-5)
+        
+        # 4. 计算奖励
+        # 假设 CV > 0.4 是人类特征明显的阈值
+        bonus = 0.0
+        if cv > 0.4:
+            # 线性奖励，最大 0.3 (即扣除 30% AI分)
+            bonus = min((cv - 0.4) * 0.6, 0.3)
+            
+        return bonus
 
     def run(self):
         if not self.model_path or not os.path.exists(self.model_path):
@@ -495,7 +529,7 @@ class AIGCDetectionThread(QThread):
 
             # ---------------------- 硬件检测 ----------------------
             use_cuda = torch.cuda.is_available()
-            use_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available() # Mac M1/M2
+            use_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
             
             if use_cuda:
                 device_str = "cuda"
@@ -509,12 +543,8 @@ class AIGCDetectionThread(QThread):
                 device_str = "cpu"
                 version = torch.__version__
                 extra_info = ""
-                # 如果版本号包含 cpu，明确提示用户
-                if "+cpu" in version:
-                    extra_info = " [错误: 安装了CPU版Torch]"
-                elif not use_cuda:
-                    extra_info = " [未发现NVIDIA显卡]"
-                
+                if "+cpu" in version: extra_info = " [错误: 安装了CPU版Torch]"
+                elif not use_cuda: extra_info = " [未发现NVIDIA显卡]"
                 self.device_signal.emit(f"🐢 CPU 运算 (Torch {version}){extra_info}", False)
             
             torch_device = torch.device(device_str)
@@ -538,9 +568,7 @@ class AIGCDetectionThread(QThread):
                         ai_label_id = int(idx)
                         break
 
-            # 核心修改：严格按 \n 切分段落，保留用户意图
             paragraphs = [p for p in self.text.split("\n") if p.strip()]
-            
             if not paragraphs:
                 self.result_signal.emit({"total_ai_rate": 0, "paragraphs": []})
                 return
@@ -559,15 +587,21 @@ class AIGCDetectionThread(QThread):
                         outputs = model(**inputs)
                         logits = outputs.logits
                         
+                        # 1. 温度缩放 (Softening)
                         scaled_logits = logits / self.TEMPERATURE
                         probs = F.softmax(scaled_logits, dim=-1)
-                        ai_score = probs[0][ai_label_id].item()
+                        raw_ai_score = probs[0][ai_label_id].item()
                         
-                        ai_score = math.pow(ai_score, 2.5)
+                        # 2. 特征校正 (Heuristics Adjustment)
+                        human_bonus = self.calculate_human_features(para)
+                        adjusted_score = max(0.0, raw_ai_score - human_bonus)
                         
-                        ai_rate = round(ai_score * 100, 2)
+                        # 3. 指数惩罚 (Power Scaling)
+                        # 对非极端的 AI 分数进行强力压制 (疑罪从无)
+                        final_ai_score = math.pow(adjusted_score, self.POWER_FACTOR)
+                        
+                        ai_rate = round(final_ai_score * 100, 2)
                     
-                    # 关键修改：计算有效字符长度（去除所有空白字符）
                     valid_chars = "".join(para.split())
                     para_len = len(valid_chars)
                     
@@ -592,11 +626,8 @@ class AIGCDetectionThread(QThread):
                         total_valid_weight += weight
                         
                 except Exception as e:
-                    # 捕获异常时，检查是否是版本不兼容问题
                     err_str = str(e)
-                    if "upgrade torch" in err_str and "v2.6" in err_str:
-                        # 抛出特定异常供外层捕获
-                        raise e 
+                    if "upgrade torch" in err_str and "v2.6" in err_str: raise e 
                     print(f"Segment Error: {e}")
                 
                 self.progress_signal.emit(30 + int(((idx + 1) / len(paragraphs)) * 65))
