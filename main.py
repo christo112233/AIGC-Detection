@@ -475,6 +475,7 @@ class AIGCDetectionThread(QThread):
     progress_signal = Signal(int)
     result_signal = Signal(dict)
     status_signal = Signal(str)
+    device_signal = Signal(str, bool) # 硬件信息信号
 
     def __init__(self, text, model_path):
         super().__init__()
@@ -492,9 +493,34 @@ class AIGCDetectionThread(QThread):
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
             import torch.nn.functional as F
 
-            torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            self.progress_signal.emit(10)
+            # ---------------------- 硬件检测 ----------------------
+            use_cuda = torch.cuda.is_available()
+            use_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available() # Mac M1/M2
             
+            if use_cuda:
+                device_str = "cuda"
+                gpu_name = torch.cuda.get_device_name(0)
+                if len(gpu_name) > 20: gpu_name = gpu_name[:20] + "..."
+                self.device_signal.emit(f"🚀 显卡加速: {gpu_name} (Torch {torch.__version__})", True)
+            elif use_mps:
+                device_str = "mps"
+                self.device_signal.emit(f"⚡ Mac GPU 加速 (Torch {torch.__version__})", True)
+            else:
+                device_str = "cpu"
+                version = torch.__version__
+                extra_info = ""
+                # 如果版本号包含 cpu，明确提示用户
+                if "+cpu" in version:
+                    extra_info = " [错误: 安装了CPU版Torch]"
+                elif not use_cuda:
+                    extra_info = " [未发现NVIDIA显卡]"
+                
+                self.device_signal.emit(f"🐢 CPU 运算 (Torch {version}){extra_info}", False)
+            
+            torch_device = torch.device(device_str)
+            # ----------------------------------------------------
+
+            self.progress_signal.emit(10)
             self.status_signal.emit("加载本地权重 (config, bin, vocab)...")
             
             tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
@@ -566,6 +592,11 @@ class AIGCDetectionThread(QThread):
                         total_valid_weight += weight
                         
                 except Exception as e:
+                    # 捕获异常时，检查是否是版本不兼容问题
+                    err_str = str(e)
+                    if "upgrade torch" in err_str and "v2.6" in err_str:
+                        # 抛出特定异常供外层捕获
+                        raise e 
                     print(f"Segment Error: {e}")
                 
                 self.progress_signal.emit(30 + int(((idx + 1) / len(paragraphs)) * 65))
@@ -578,7 +609,13 @@ class AIGCDetectionThread(QThread):
             self.result_signal.emit({"total_ai_rate": avg, "paragraphs": results})
 
         except Exception as e:
-            self.result_signal.emit({"error": f"推理引擎异常:\n{str(e)}"})
+            error_str = str(e)
+            if "upgrade torch" in error_str and "v2.6" in error_str:
+                self.result_signal.emit({
+                    "error": "【环境版本冲突】\n\n检测到您的 PyTorch 版本过旧，无法加载当前的 .bin 模型文件。\n\n解决方案：\n请在终端运行以下命令升级 PyTorch：\n\npip install --upgrade torch torchvision torchaudio"
+                })
+            else:
+                self.result_signal.emit({"error": f"推理引擎异常:\n{error_str}"})
 
 # ---------------------- 主窗口 ----------------------
 
@@ -646,7 +683,15 @@ class AIGCSentinel(QMainWindow):
         self.status_icon = QLabel("●"); self.status_text = QLabel("初始化...")
         self.status_text.setStyleSheet("font-size: 12px; font-weight: bold;")
         self.btn_refresh = QPushButton("🔄 刷新状态"); self.btn_refresh.setCursor(Qt.PointingHandCursor); self.btn_refresh.setFixedSize(80, 24); self.btn_refresh.clicked.connect(self.manual_refresh_model)
+        
         sb_layout.addWidget(self.status_icon); sb_layout.addWidget(self.status_text); sb_layout.addWidget(self.btn_refresh); sb_layout.addStretch()
+        
+        # --- 硬件显示标签 ---
+        self.label_device = QLabel("")
+        self.label_device.setStyleSheet("color: #666; font-size: 11px; margin-right: 10px;")
+        sb_layout.addWidget(self.label_device) # 添加到布局
+        # -------------------
+
         self.progress_bar = ModernProgressBar(); self.progress_bar.setFixedWidth(300); sb_layout.addWidget(self.progress_bar)
         layout.addWidget(status_bar)
 
@@ -692,6 +737,11 @@ class AIGCSentinel(QMainWindow):
         self.is_model_valid = False; self.model_path = ""
         self.status_icon.setStyleSheet(f"color: #FF453A; font-size: 16px;")
         self.status_text.setText(f"⚠️ 无法检测: {reason}"); self.status_text.setStyleSheet("color: #FF453A; font-weight: bold;")
+
+    def update_device_ui(self, msg, is_gpu):
+        self.label_device.setText(msg)
+        color = "#00E070" if is_gpu else "#FFD60A" # Green for GPU, Yellow for CPU
+        self.label_device.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 11px; margin-right: 15px;")
 
     def toggle_theme(self, is_dark):
         pixmap = self.grab()
@@ -776,6 +826,7 @@ class AIGCSentinel(QMainWindow):
         self.thread.status_signal.connect(lambda s: self.status_text.setText(s))
         self.thread.progress_signal.connect(self.progress_bar.setValue)
         self.thread.result_signal.connect(self.process_results)
+        self.thread.device_signal.connect(self.update_device_ui) # 连接硬件检测信号
         self.thread.finished.connect(lambda: [self.btn_detect.setEnabled(True), self.btn_detect.setText("⚡ 开始深度检测"), self.status_text.setText("分析完成") if self.is_model_valid else None, self.progress_bar.setValue(100)])
         self.thread.start()
 
