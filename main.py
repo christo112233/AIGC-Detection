@@ -43,7 +43,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import (
     QColor, QLinearGradient, QPainter, QFont, QTextCursor, 
     QTextCharFormat, QPen, QPolygonF, QBrush, QPalette, QIcon, QRadialGradient,
-    QPainterPath, QPixmap, QTransform, QFontMetrics
+    QPainterPath, QPixmap, QTransform, QFontMetrics, QCursor
 )
 
 # ---------------------- 路径处理辅助函数 ----------------------
@@ -284,7 +284,6 @@ class DragTextEdit(QTextEdit):
     @scale_factor.setter
     def scale_factor(self, v): self._scale_factor = v; self.update()
 
-    # --- 修复 1：拦截粘贴操作，强制转为纯文本 ---
     def insertFromMimeData(self, source):
         if source.hasText():
             self.insertPlainText(source.text())
@@ -309,7 +308,15 @@ class DragTextEdit(QTextEdit):
         urls = e.mimeData().urls()
         if urls:
             path = urls[0].toLocalFile()
-            if os.path.splitext(path)[1].lower() in ['.txt', '.docx']: self.file_dropped.emit(path)
+            ext = os.path.splitext(path)[1].lower()
+            if ext in ['.txt', '.docx']:
+                self.file_dropped.emit(path)
+                # 修复 1：显式接受操作，防止系统认为拖拽失败
+                e.acceptProposedAction()
+            else:
+                e.ignore()
+        else:
+            e.ignore()
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -325,19 +332,15 @@ class DragTextEdit(QTextEdit):
             p.drawPath(path)
 
 class ResultBlock(QWidget):
-    """
-    更新说明：增加 is_ignored 参数，用于区分是否参与了总分计算
-    """
     def __init__(self, content, ai_rate, is_ignored=False, parent=None):
         super().__init__(parent)
         self.content = content
         self.ai_rate = ai_rate
-        self.is_ignored = is_ignored # 标记是否被忽略
+        self.is_ignored = is_ignored 
         
         self.setFixedHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         
-        # 1. 颜色判定 (如果忽略，则强制灰色)
         if self.is_ignored:
             self.accent_color = Theme.ACCENT_GRAY
             self.verdict = "过短忽略"
@@ -359,7 +362,6 @@ class ResultBlock(QWidget):
         
         self.text_label = QLabel("")
         self.text_label.setWordWrap(True)
-        # 忽略的段落文字也稍微灰一点
         text_color = "#777" if is_ignored else Theme.get('text_sub')
         self.text_label.setStyleSheet(f"color: {text_color}; font-size: 11pt; line-height: 1.6;")
         self.text_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
@@ -392,7 +394,6 @@ class ResultBlock(QWidget):
         QTimer.singleShot(delay, self._begin)
 
     def _begin(self):
-        # 预估 Tag 长度
         if self.is_ignored:
             tag_preview = "  [字数过少，已忽略]"
         else:
@@ -448,7 +449,6 @@ class ResultBlock(QWidget):
             p.setTransform(trans)
             
             bg_c = QColor(Theme.get('input_bg'))
-            # 忽略的段落背景更淡
             if self.is_ignored:
                 bg_c.setAlpha(150)
             elif self.ai_rate > 60:
@@ -470,7 +470,7 @@ class ResultBlock(QWidget):
         super().resizeEvent(event)
 
 
-# ---------------------- 核心检测线程 (重构版) ----------------------
+# ---------------------- 核心检测线程 ----------------------
 class AIGCDetectionThread(QThread):
     progress_signal = Signal(int)
     result_signal = Signal(dict)
@@ -481,7 +481,7 @@ class AIGCDetectionThread(QThread):
         self.text = text
         self.model_path = model_path
         self.MIN_VALID_CHARS = 10
-        self.TEMPERATURE = 1.5 # 核心修改：温度系数
+        self.TEMPERATURE = 1.8 
 
     def run(self):
         if not self.model_path or not os.path.exists(self.model_path):
@@ -489,25 +489,21 @@ class AIGCDetectionThread(QThread):
             return
 
         try:
-            # 显式导入，不使用 pipeline
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
             import torch.nn.functional as F
 
-            # 检测设备
             torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.progress_signal.emit(10)
             
             self.status_signal.emit("加载本地权重 (config, bin, vocab)...")
             
-            # 手动加载
             tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
             model = AutoModelForSequenceClassification.from_pretrained(self.model_path, local_files_only=True)
             model.to(torch_device)
-            model.eval() # 评估模式
+            model.eval() 
             
             self.progress_signal.emit(30)
 
-            # 智能判定 AI 标签索引
             ai_label_id = 1 
             if hasattr(model.config, 'id2label') and model.config.id2label:
                 for idx, label in model.config.id2label.items():
@@ -516,7 +512,9 @@ class AIGCDetectionThread(QThread):
                         ai_label_id = int(idx)
                         break
 
+            # 核心修改：严格按 \n 切分段落，保留用户意图
             paragraphs = [p for p in self.text.split("\n") if p.strip()]
+            
             if not paragraphs:
                 self.result_signal.emit({"total_ai_rate": 0, "paragraphs": []})
                 return
@@ -528,27 +526,25 @@ class AIGCDetectionThread(QThread):
             for idx, para in enumerate(paragraphs):
                 self.status_signal.emit(f"深度指纹分析中... {idx+1}/{len(paragraphs)}")
                 try:
-                    # 手动 Tokenization
                     inputs = tokenizer(para, return_tensors="pt", truncation=True, max_length=512)
                     inputs = {k: v.to(torch_device) for k, v in inputs.items()}
 
-                    # 手动推理
                     with torch.no_grad():
                         outputs = model(**inputs)
                         logits = outputs.logits
                         
-                        # --- 温度缩放 ---
                         scaled_logits = logits / self.TEMPERATURE
-                        
-                        # Softmax
                         probs = F.softmax(scaled_logits, dim=-1)
-                        
-                        # 提取分数
                         ai_score = probs[0][ai_label_id].item()
+                        
+                        ai_score = math.pow(ai_score, 2.5)
+                        
                         ai_rate = round(ai_score * 100, 2)
                     
-                    # 权重计算
-                    para_len = len(para)
+                    # 关键修改：计算有效字符长度（去除所有空白字符）
+                    valid_chars = "".join(para.split())
+                    para_len = len(valid_chars)
+                    
                     is_ignored = False
                     weight = 0
                     
@@ -798,6 +794,7 @@ class AIGCSentinel(QMainWindow):
         self.result_layout.addStretch()
 
     def handle_file_content(self, path):
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor))
         try:
             ext = os.path.splitext(path)[1].lower()
             content = ""
@@ -807,10 +804,45 @@ class AIGCSentinel(QMainWindow):
                 try: content = raw.decode(encoding)
                 except: content = raw.decode('utf-8', errors='ignore')
             elif ext == '.docx':
-                if not HAS_DOCX: QMessageBox.warning(self, "组件缺失", "请安装 python-docx"); return
-                doc = docx.Document(path); content = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-            self.input_edit.setPlainText(content); self.status_text.setText(f"已加载: {os.path.basename(path)}")
-        except Exception as e: QMessageBox.critical(self, "错误", f"读取失败: {str(e)}")
+                if not HAS_DOCX: 
+                    QMessageBox.warning(self, "组件缺失", "请安装 python-docx 库以支持 Word 文档")
+                    return
+                try:
+                    doc = docx.Document(path)
+                    text_parts = []
+                    # 修复：同时读取段落和表格
+                    for para in doc.paragraphs:
+                        if para.text.strip(): text_parts.append(para.text)
+                    
+                    # 关键修复：加入表格去重逻辑
+                    for table in doc.tables:
+                        for row in table.rows:
+                            unique_cells = []
+                            seen_cells = set()
+                            for cell in row.cells:
+                                if cell not in seen_cells:
+                                    unique_cells.append(cell)
+                                    seen_cells.add(cell)
+                            
+                            row_text_list = []
+                            for cell in unique_cells:
+                                txt = cell.text.strip()
+                                if txt: row_text_list.append(txt)
+                            
+                            if row_text_list:
+                                text_parts.append(" ".join(row_text_list))
+                                
+                    content = "\n".join(text_parts)
+                except Exception as doc_err:
+                    QMessageBox.warning(self, "解析警告", f"文档解析异常: {str(doc_err)}")
+                    content = ""
+
+            self.input_edit.setPlainText(content)
+            self.status_text.setText(f"已加载: {os.path.basename(path)}")
+        except Exception as e: 
+            QMessageBox.critical(self, "错误", f"读取失败: {str(e)}")
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def import_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "打开文档", "", "Text/Word (*.txt *.docx)")
