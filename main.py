@@ -7,7 +7,6 @@ import time
 import html
 
 # --- 核心修复：防止 PyInstaller --noconsole 模式下 transformers 报错 ---
-# 必须在导入 transformers 之前执行
 class NullWriter:
     def write(self, text): pass
     def flush(self): pass
@@ -39,7 +38,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import (
     Qt, Signal, QThread, QSize, Property, QPropertyAnimation, 
     QEasingCurve, QRectF, QPointF, QParallelAnimationGroup, QTimer,
-    QAbstractAnimation, QByteArray, QSequentialAnimationGroup
+    QAbstractAnimation, QByteArray, QSequentialAnimationGroup, QMimeData
 )
 from PySide6.QtGui import (
     QColor, QLinearGradient, QPainter, QFont, QTextCursor, 
@@ -47,31 +46,22 @@ from PySide6.QtGui import (
     QPainterPath, QPixmap, QTransform, QFontMetrics
 )
 
-# ---------------------- 路径处理辅助函数 (双重保障) ----------------------
+# ---------------------- 路径处理辅助函数 ----------------------
 def get_resource_path(relative_path):
-    """
-    智能获取资源路径：
-    1. 优先检查程序运行目录
-    2. 其次检查 PyInstaller 内部临时目录
-    """
-    # 1. 检查 exe 所在目录 (外部目录)
     if getattr(sys, 'frozen', False):
-        # 如果是打包后的 exe
         base_path_external = os.path.dirname(sys.executable)
     else:
-        # 如果是脚本运行
         base_path_external = os.path.dirname(os.path.abspath(__file__))
     
     external_path = os.path.join(base_path_external, relative_path)
     if os.path.exists(external_path):
         return external_path
 
-    # 2. 检查内部目录 (_MEIPASS)
     if hasattr(sys, '_MEIPASS'):
         internal_path = os.path.join(sys._MEIPASS, relative_path)
         return internal_path
 
-    return external_path # 默认返回外部路径，即使不存在
+    return external_path
 
 # ---------------------- 核心配色与状态管理 ----------------------
 class Theme:
@@ -110,6 +100,7 @@ class Theme:
     ACCENT_RED = "#FF453A"
     ACCENT_YELLOW = "#FFD60A"
     ACCENT_BLUE = "#2D79FF"
+    ACCENT_GRAY = "#666666"
 
     @classmethod
     def get(cls, key):
@@ -272,8 +263,8 @@ class DragTextEdit(QTextEdit):
         self.setAcceptDrops(True)
         self.setPlaceholderText("在此处粘贴文本或拖入文件...")
         
-        self._glow_strength = 0.0 # 0.0 - 1.0
-        self._scale_factor = 1.0  # 1.0 - 1.02
+        self._glow_strength = 0.0
+        self._scale_factor = 1.0
         
         self.anim_glow = QPropertyAnimation(self, b"glow_strength", self)
         self.anim_glow.setDuration(300)
@@ -292,6 +283,13 @@ class DragTextEdit(QTextEdit):
     def scale_factor(self): return self._scale_factor
     @scale_factor.setter
     def scale_factor(self, v): self._scale_factor = v; self.update()
+
+    # --- 修复 1：拦截粘贴操作，强制转为纯文本 ---
+    def insertFromMimeData(self, source):
+        if source.hasText():
+            self.insertPlainText(source.text())
+        else:
+            super().insertFromMimeData(source)
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
@@ -327,14 +325,23 @@ class DragTextEdit(QTextEdit):
             p.drawPath(path)
 
 class ResultBlock(QWidget):
-    def __init__(self, content, ai_rate, parent=None):
+    """
+    更新说明：增加 is_ignored 参数，用于区分是否参与了总分计算
+    """
+    def __init__(self, content, ai_rate, is_ignored=False, parent=None):
         super().__init__(parent)
         self.content = content
         self.ai_rate = ai_rate
-        self.setFixedHeight(0) # 初始高度0
+        self.is_ignored = is_ignored # 标记是否被忽略
+        
+        self.setFixedHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         
-        if ai_rate < 30: 
+        # 1. 颜色判定 (如果忽略，则强制灰色)
+        if self.is_ignored:
+            self.accent_color = Theme.ACCENT_GRAY
+            self.verdict = "过短忽略"
+        elif ai_rate < 30: 
             self.accent_color = Theme.ACCENT_GREEN
             self.verdict = "人类创作"
         elif ai_rate < 60: 
@@ -345,14 +352,16 @@ class ResultBlock(QWidget):
             self.verdict = "疑似生成"
 
         self.content_widget = QWidget(self)
-        self.content_widget.move(100, 0) # 初始位置偏移
+        self.content_widget.move(100, 0)
 
         self.layout = QVBoxLayout(self.content_widget)
         self.layout.setContentsMargins(15, 12, 15, 12)
         
         self.text_label = QLabel("")
         self.text_label.setWordWrap(True)
-        self.text_label.setStyleSheet(f"color: {Theme.get('text_sub')}; font-size: 11pt; line-height: 1.6;")
+        # 忽略的段落文字也稍微灰一点
+        text_color = "#777" if is_ignored else Theme.get('text_sub')
+        self.text_label.setStyleSheet(f"color: {text_color}; font-size: 11pt; line-height: 1.6;")
         self.text_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.text_label.setTextFormat(Qt.RichText) 
         
@@ -367,7 +376,7 @@ class ResultBlock(QWidget):
         self.anim_entry.setEasingCurve(QEasingCurve.OutCubic)
         
         self.timer_type = QTimer(self)
-        self.timer_type.setInterval(5) # 打字速度
+        self.timer_type.setInterval(5)
         self.timer_type.timeout.connect(self._step_typewriter)
 
     @Property(float)
@@ -383,15 +392,20 @@ class ResultBlock(QWidget):
         QTimer.singleShot(delay, self._begin)
 
     def _begin(self):
-        tag_preview = f"  [AI: {int(self.ai_rate)}%]"
+        # 预估 Tag 长度
+        if self.is_ignored:
+            tag_preview = "  [字数过少，已忽略]"
+        else:
+            tag_preview = f"  [AI: {int(self.ai_rate)}%]"
+            
         full_text_preview = self.content + tag_preview
         
-        available_w = max(100, self.width() - 30) 
+        available_w = max(100, self.width() - 60) 
         font = self.text_label.font()
         fm = QFontMetrics(font)
         rect = fm.boundingRect(0, 0, available_w, 10000, Qt.TextWordWrap | Qt.AlignLeft, full_text_preview)
         
-        target_h = rect.height() + 35 
+        target_h = rect.height() + 50 
         
         self.setFixedHeight(target_h)
         self.content_widget.resize(self.width(), target_h)
@@ -415,7 +429,12 @@ class ResultBlock(QWidget):
             final_plain = html.escape(self.content)
             c = QColor(self.accent_color)
             color_hex = c.name() 
-            tag_html = f"&nbsp;&nbsp;<span style='color:{color_hex}; font-weight:bold; font-size:10pt;'>[AI: {int(self.ai_rate)}% | {self.verdict}]</span>"
+            
+            if self.is_ignored:
+                tag_html = f"&nbsp;&nbsp;<span style='color:{color_hex}; font-size:9pt; font-style:italic;'>[字数过少，不计入总分]</span>"
+            else:
+                tag_html = f"&nbsp;&nbsp;<span style='color:{color_hex}; font-weight:bold; font-size:10pt;'>[AI: {int(self.ai_rate)}% | {self.verdict}]</span>"
+            
             self.text_label.setText(final_plain + tag_html)
 
     def paintEvent(self, event):
@@ -429,7 +448,10 @@ class ResultBlock(QWidget):
             p.setTransform(trans)
             
             bg_c = QColor(Theme.get('input_bg'))
-            if self.ai_rate > 60:
+            # 忽略的段落背景更淡
+            if self.is_ignored:
+                bg_c.setAlpha(150)
+            elif self.ai_rate > 60:
                 bg_c = QColor(Theme.ACCENT_RED)
                 bg_c.setAlpha(15) 
             
@@ -448,7 +470,7 @@ class ResultBlock(QWidget):
         super().resizeEvent(event)
 
 
-# ---------------------- 核心检测线程 ----------------------
+# ---------------------- 核心检测线程 (重构版) ----------------------
 class AIGCDetectionThread(QThread):
     progress_signal = Signal(int)
     result_signal = Signal(dict)
@@ -458,24 +480,41 @@ class AIGCDetectionThread(QThread):
         super().__init__()
         self.text = text
         self.model_path = model_path
+        self.MIN_VALID_CHARS = 10
+        self.TEMPERATURE = 1.5 # 核心修改：温度系数
 
     def run(self):
-        # 使用更新后的路径检查
         if not self.model_path or not os.path.exists(self.model_path):
             self.result_signal.emit({"error": "模型路径无效"})
             return
 
         try:
-            from transformers import pipeline, AutoModelForSequenceClassification, AutoTokenizer
-            device = 0 if torch.cuda.is_available() else -1
+            # 显式导入，不使用 pipeline
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            import torch.nn.functional as F
+
+            # 检测设备
+            torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.progress_signal.emit(10)
             
             self.status_signal.emit("加载本地权重 (config, bin, vocab)...")
-            # local_files_only=True 确保只使用本地文件
+            
+            # 手动加载
             tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
             model = AutoModelForSequenceClassification.from_pretrained(self.model_path, local_files_only=True)
-            detector = pipeline("text-classification", model=model, tokenizer=tokenizer, device=device)
+            model.to(torch_device)
+            model.eval() # 评估模式
+            
             self.progress_signal.emit(30)
+
+            # 智能判定 AI 标签索引
+            ai_label_id = 1 
+            if hasattr(model.config, 'id2label') and model.config.id2label:
+                for idx, label in model.config.id2label.items():
+                    label_str = str(label).lower()
+                    if any(x in label_str for x in ['fake', 'ai', 'chatgpt', 'generated', '1', 'label_1']):
+                        ai_label_id = int(idx)
+                        break
 
             paragraphs = [p for p in self.text.split("\n") if p.strip()]
             if not paragraphs:
@@ -483,32 +522,63 @@ class AIGCDetectionThread(QThread):
                 return
 
             results = []
-            total_score = 0
-            total_chars = 0
+            total_weighted_score = 0
+            total_valid_weight = 0
 
             for idx, para in enumerate(paragraphs):
                 self.status_signal.emit(f"深度指纹分析中... {idx+1}/{len(paragraphs)}")
                 try:
-                    inference = detector(para[:512])[0]
-                    label = inference['label'].lower()
-                    score = inference['score']
+                    # 手动 Tokenization
+                    inputs = tokenizer(para, return_tensors="pt", truncation=True, max_length=512)
+                    inputs = {k: v.to(torch_device) for k, v in inputs.items()}
+
+                    # 手动推理
+                    with torch.no_grad():
+                        outputs = model(**inputs)
+                        logits = outputs.logits
+                        
+                        # --- 温度缩放 ---
+                        scaled_logits = logits / self.TEMPERATURE
+                        
+                        # Softmax
+                        probs = F.softmax(scaled_logits, dim=-1)
+                        
+                        # 提取分数
+                        ai_score = probs[0][ai_label_id].item()
+                        ai_rate = round(ai_score * 100, 2)
                     
-                    is_ai_label = any(x in label for x in ['fake', 'ai', 'chatgpt', 'generated', '1', 'label_1'])
+                    # 权重计算
+                    para_len = len(para)
+                    is_ignored = False
+                    weight = 0
                     
-                    if is_ai_label:
-                        ai_rate = round(score * 100, 2)
+                    if para_len < self.MIN_VALID_CHARS:
+                        is_ignored = True
+                        weight = 0
                     else:
-                        ai_rate = round((1 - score) * 100, 2)
+                        is_ignored = False
+                        weight = para_len
                     
-                    results.append({"content": para, "ai_rate": ai_rate})
-                    total_score += (ai_rate * len(para))
-                    total_chars += len(para)
+                    results.append({
+                        "content": para, 
+                        "ai_rate": ai_rate,
+                        "is_ignored": is_ignored
+                    })
+                    
+                    if not is_ignored:
+                        total_weighted_score += (ai_rate * weight)
+                        total_valid_weight += weight
+                        
                 except Exception as e:
                     print(f"Segment Error: {e}")
                 
                 self.progress_signal.emit(30 + int(((idx + 1) / len(paragraphs)) * 65))
 
-            avg = round(total_score / total_chars, 2) if total_chars > 0 else 0
+            if total_valid_weight > 0:
+                avg = round(total_weighted_score / total_valid_weight, 2)
+            else:
+                avg = 0
+                
             self.result_signal.emit({"total_ai_rate": avg, "paragraphs": results})
 
         except Exception as e:
@@ -558,12 +628,10 @@ class AIGCSentinel(QMainWindow):
         self.input_edit = DragTextEdit(); self.input_edit.file_dropped.connect(self.handle_file_content)
         in_layout.addWidget(self.label_input); in_layout.addWidget(self.input_edit)
 
-        # --- 结果区域改造：QScrollArea ---
         self.card_output = QFrame(); out_layout = QVBoxLayout(self.card_output)
         self.gauge = AIGCGaugeWidget()
         self.label_output = QLabel("🔍 逐段溯源分析"); self.label_output.setStyleSheet("font-weight: bold; margin-top: 10px;")
         
-        # 结果滚动区
         self.result_scroll = QScrollArea()
         self.result_scroll.setWidgetResizable(True)
         self.result_scroll.setFrameShape(QFrame.NoFrame)
@@ -594,8 +662,6 @@ class AIGCSentinel(QMainWindow):
         else: QMessageBox.warning(self, "状态更新", "仍然未检测到完整模型。\n请确保文件夹包含: config.json, pytorch_model.bin, vocab.txt 等")
 
     def check_model_status(self):
-        # 使用自定义的 get_resource_path 函数来获取模型路径
-        # 这确保了无论是在开发环境还是在打包后的 EXE 中都能找到 'AIGC_Model'
         target_dir = get_resource_path("AIGC_Model")
         
         if not os.path.exists(target_dir):
@@ -723,7 +789,8 @@ class AIGCSentinel(QMainWindow):
         
         delay_counter = 0
         for p in res["paragraphs"]:
-            block = ResultBlock(p["content"], p["ai_rate"])
+            # 传递 is_ignored 参数到 UI 卡片
+            block = ResultBlock(p["content"], p["ai_rate"], is_ignored=p.get("is_ignored", False))
             self.result_layout.addWidget(block)
             block.start_reveal(delay_counter)
             delay_counter += 150
