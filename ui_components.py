@@ -1,6 +1,7 @@
 import math
 import html
 import os
+
 from PySide6.QtWidgets import (
     QWidget, QPushButton, QLabel, QFrame, QTextEdit, QHBoxLayout, QVBoxLayout, QSizePolicy, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QScrollArea
 )

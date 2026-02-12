@@ -4,6 +4,7 @@ import math
 import re
 from PySide6.QtCore import QThread, Signal
 
+
 # --- 核心修复：防止 PyInstaller --noconsole 模式下 transformers 报错 ---
 class NullWriter:
     def write(self, text): pass
