@@ -1,28 +1,7 @@
 import sys
 import os
-import torch
-import random
-import math
-import time
-import re
 
-# 导入分离的 UI 组件
-# 确保 ui_components.py 在同一目录下
-from ui_components import (
-    Theme, ThemeSwitch, ThreeDButton, ModernProgressBar, 
-    AIGCGaugeWidget, AIGCPieChart, HeatmapBar, DragTextEdit, ResultBlock
-)
-
-# --- 核心修复：防止 PyInstaller --noconsole 模式下 transformers 报错 ---
-class NullWriter:
-    def write(self, text): pass
-    def flush(self): pass
-    def isatty(self): return False
-
-if sys.stdout is None: sys.stdout = NullWriter()
-if sys.stderr is None: sys.stderr = NullWriter()
-
-# --- 依赖库安全导入 ---
+# --- 依赖库安全导入 (用于读取文档) ---
 try:
     import chardet
     HAS_CHARDET = True
@@ -40,156 +19,31 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QSplitter, QGraphicsOpacityEffect, QScrollArea, QCheckBox,
     QPushButton 
 )
-from PySide6.QtCore import (
-    Qt, Signal, QThread, QPropertyAnimation, QEasingCurve, QTimer
-)
+from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QTimer, QThread
 from PySide6.QtGui import QCursor, QFont
 
-# ---------------------- 路径处理辅助函数 ----------------------
-def get_resource_path(relative_path):
-    if getattr(sys, 'frozen', False):
-        base_path_external = os.path.dirname(sys.executable)
-    else:
-        base_path_external = os.path.dirname(os.path.abspath(__file__))
-    
-    external_path = os.path.join(base_path_external, relative_path)
-    if os.path.exists(external_path):
-        return external_path
+# --- 导入分离的模块 ---
+from ui_components import (
+    Theme, ThemeSwitch, ThreeDButton, ModernProgressBar, 
+    AIGCGaugeWidget, AIGCPieChart, HeatmapBar, DragTextEdit, ResultBlock, StatsDashboard
+)
+from core_engine import AIGCDetectionThread, get_resource_path
 
-    if hasattr(sys, '_MEIPASS'):
-        internal_path = os.path.join(sys._MEIPASS, relative_path)
-        return internal_path
-
-    return external_path
-
-# ---------------------- 核心检测线程 ----------------------
-class AIGCDetectionThread(QThread):
-    progress_signal = Signal(int)
-    result_signal = Signal(dict)
-    status_signal = Signal(str)
-    device_signal = Signal(str, bool)
-
-    def __init__(self, text, model_path):
-        super().__init__()
-        self.text = text
-        self.model_path = model_path
-        self.MIN_VALID_CHARS = 10
-        self.TEMPERATURE = 2.0
-        self.POWER_FACTOR = 3.5
-
-    def calculate_human_features(self, text):
-        sentences = re.split(r'[。.!！?？;；\n]+', text)
-        sentences = [s for s in sentences if len(s.strip()) > 3]
-        if len(sentences) < 3: return 0.0
-        lengths = [len(s) for s in sentences]
-        mean_len = sum(lengths) / len(lengths)
-        variance = sum((l - mean_len) ** 2 for l in lengths) / len(lengths)
-        std_dev = math.sqrt(variance)
-        cv = std_dev / (mean_len + 1e-5)
-        bonus = 0.0
-        if cv > 0.4: bonus = min((cv - 0.4) * 0.6, 0.3)
-        return bonus
-
-    def run(self):
-        if not self.model_path or not os.path.exists(self.model_path):
-            self.result_signal.emit({"error": "模型路径无效"})
-            return
-
-        try:
-            from transformers import AutoModelForSequenceClassification, AutoTokenizer
-            import torch.nn.functional as F
-
-            use_cuda = torch.cuda.is_available()
-            use_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-            
-            if use_cuda:
-                device_str = "cuda"
-                gpu_name = torch.cuda.get_device_name(0)
-                if len(gpu_name) > 20: gpu_name = gpu_name[:20] + "..."
-                self.device_signal.emit(f"🚀 显卡加速: {gpu_name} (Torch {torch.__version__})", True)
-            elif use_mps:
-                device_str = "mps"
-                self.device_signal.emit(f"⚡ Mac GPU 加速 (Torch {torch.__version__})", True)
-            else:
-                device_str = "cpu"
-                version = torch.__version__
-                extra_info = " [错误: 安装了CPU版Torch]" if "+cpu" in version else (" [未发现NVIDIA显卡]" if not use_cuda else "")
-                self.device_signal.emit(f"🐢 CPU 运算 (Torch {version}){extra_info}", False)
-            
-            torch_device = torch.device(device_str)
-            
-            self.progress_signal.emit(10)
-            self.status_signal.emit("加载本地权重 (config, bin, vocab)...")
-            
-            tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
-            model = AutoModelForSequenceClassification.from_pretrained(self.model_path, local_files_only=True)
-            model.to(torch_device)
-            model.eval() 
-            self.progress_signal.emit(30)
-
-            ai_label_id = 1 
-            if hasattr(model.config, 'id2label') and model.config.id2label:
-                for idx, label in model.config.id2label.items():
-                    if any(x in str(label).lower() for x in ['fake', 'ai', 'chatgpt', 'generated', '1', 'label_1']):
-                        ai_label_id = int(idx); break
-
-            paragraphs = [p for p in self.text.split("\n") if p.strip()]
-            if not paragraphs:
-                self.result_signal.emit({"total_ai_rate": 0, "paragraphs": []}); return
-
-            results = []
-            total_weighted_score = 0; total_valid_weight = 0
-
-            for idx, para in enumerate(paragraphs):
-                self.status_signal.emit(f"深度指纹分析中... {idx+1}/{len(paragraphs)}")
-                try:
-                    inputs = tokenizer(para, return_tensors="pt", truncation=True, max_length=512)
-                    inputs = {k: v.to(torch_device) for k, v in inputs.items()}
-                    with torch.no_grad():
-                        outputs = model(**inputs)
-                        logits = outputs.logits
-                        scaled_logits = logits / self.TEMPERATURE
-                        probs = F.softmax(scaled_logits, dim=-1)
-                        raw_ai_score = probs[0][ai_label_id].item()
-                        human_bonus = self.calculate_human_features(para)
-                        adjusted_score = max(0.0, raw_ai_score - human_bonus)
-                        final_ai_score = math.pow(adjusted_score, self.POWER_FACTOR)
-                        ai_rate = round(final_ai_score * 100, 2)
-                    
-                    valid_chars = "".join(para.split())
-                    para_len = len(valid_chars)
-                    is_ignored = para_len < self.MIN_VALID_CHARS
-                    weight = 0 if is_ignored else para_len
-                    
-                    results.append({"content": para, "ai_rate": ai_rate, "is_ignored": is_ignored})
-                    if not is_ignored:
-                        total_weighted_score += (ai_rate * weight); total_valid_weight += weight
-                except Exception as e:
-                    if "upgrade torch" in str(e) and "v2.6" in str(e): raise e 
-                    print(f"Segment Error: {e}")
-                self.progress_signal.emit(30 + int(((idx + 1) / len(paragraphs)) * 65))
-
-            avg = round(total_weighted_score / total_valid_weight, 2) if total_valid_weight > 0 else 0
-            self.result_signal.emit({"total_ai_rate": avg, "paragraphs": results})
-
-        except Exception as e:
-            if "upgrade torch" in str(e) and "v2.6" in str(e):
-                self.result_signal.emit({"error": "【环境版本冲突】\n请升级 PyTorch 版本。\npip install --upgrade torch torchvision torchaudio"})
-            else:
-                self.result_signal.emit({"error": f"推理引擎异常:\n{str(e)}"})
-
-# ---------------------- 主窗口 ----------------------
+# ---------------------- 主程序窗口 ----------------------
 class AIGCSentinel(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AIGC 哨兵 - 智能溯源系统")
+        self.setWindowTitle("DeepVeri - 智能溯源系统")
         self.resize(1300, 850)
-        self.is_model_valid = False; self.model_path = ""
+        self.is_model_valid = False
+        self.model_path = ""
+        
         self.transition_overlay = QLabel(self)
         self.transition_overlay.hide()
         self.transition_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.transition_effect = QGraphicsOpacityEffect(self.transition_overlay)
         self.transition_overlay.setGraphicsEffect(self.transition_effect)
+        
         self.init_ui()
         self.update_theme()
         self.check_model_status() 
@@ -198,32 +52,42 @@ class AIGCSentinel(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(40, 40, 40, 30)
-        layout.setSpacing(25)
+        
+        # === 核心优化: 彻底压榨边缘留白，将所有空间交还给内容层 ===
+        layout.setContentsMargins(20, 20, 20, 15) 
+        layout.setSpacing(15) 
+        # =======================================================
 
+        # ------------------ 顶部 Header ------------------
         header = QHBoxLayout()
         title_box = QVBoxLayout()
-        self.title_lbl = QLabel("AIGC SENTINEL")
-        self.title_lbl.setStyleSheet("font-size: 28px; font-weight: 900; letter-spacing: 2px;")
+        self.title_lbl = QLabel("DeepVeri")
+        self.title_lbl.setStyleSheet("font-size: 24px; font-weight: 900; letter-spacing: 1.5px;") # 缩小字号
         self.sub_lbl = QLabel("深度学习文本溯源检测平台")
-        self.sub_lbl.setStyleSheet(f"font-size: 12px; font-weight: bold; letter-spacing: 1px; color: #2D79FF;")
+        self.sub_lbl.setStyleSheet(f"font-size: 11px; font-weight: bold; letter-spacing: 1px; color: #2D79FF;")
         title_box.addWidget(self.title_lbl)
         title_box.addWidget(self.sub_lbl)
         header.addLayout(title_box)
         header.addStretch()
+        
         self.theme_switch = ThemeSwitch()
         self.theme_switch.toggled.connect(self.toggle_theme)
         header.addWidget(self.theme_switch)
-        header.addSpacing(20)
+        header.addSpacing(15)
+        
+        # 缩小按钮宽度，腾出横向空间
         self.btn_import = ThreeDButton("导入文档", is_primary=False, parent=self)
-        self.btn_import.setFixedWidth(120)
+        self.btn_import.setFixedWidth(100)
         self.btn_import.clicked.connect(self.import_file)
+        
         self.btn_clear = ThreeDButton("清空", is_primary=False, parent=self)
-        self.btn_clear.setFixedWidth(100)
+        self.btn_clear.setFixedWidth(80)
         self.btn_clear.clicked.connect(self.clear_content)
+        
         self.btn_detect = ThreeDButton("⚡ 开始深度检测", parent=self)
-        self.btn_detect.setFixedWidth(180)
+        self.btn_detect.setFixedWidth(140)
         self.btn_detect.clicked.connect(self.run_detection)
+        
         header.addWidget(self.btn_import)
         header.addSpacing(10)
         header.addWidget(self.btn_clear)
@@ -231,8 +95,11 @@ class AIGCSentinel(QMainWindow):
         header.addWidget(self.btn_detect)
         layout.addLayout(header)
 
+        # ------------------ 中间核心区域 ------------------
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(20)
+        
+        # 左侧：输入区
         self.card_input = QFrame()
         in_layout = QVBoxLayout(self.card_input)
         self.label_input = QLabel("📝 原文输入 (支持 .txt / .docx 拖入)")
@@ -242,96 +109,88 @@ class AIGCSentinel(QMainWindow):
         in_layout.addWidget(self.label_input)
         in_layout.addWidget(self.input_edit)
 
-        # 结果区域容器
+        # 右侧：结果区域
         self.card_output = QFrame() 
-        # 使用 HBoxLayout 来放置 滚动区 + 热力图
         output_outer_layout = QHBoxLayout(self.card_output)
         output_outer_layout.setContentsMargins(0, 10, 5, 10)
         
-        # 结果主体 (仪表盘 + 饼图 + 列表)
         result_main_widget = QWidget()
         result_main_layout = QVBoxLayout(result_main_widget)
         result_main_layout.setContentsMargins(0,0,0,0)
         
-        # 1. 顶部数据可视化区域 (横向均分)
-        viz_container = QWidget()
-        viz_layout = QHBoxLayout(viz_container)
-        viz_layout.setContentsMargins(0, 0, 0, 0)
+        # 可视化组合面板
+        self.dashboard = StatsDashboard()
+        self.gauge = self.dashboard.gauge
+        self.pie_chart = self.dashboard.pie_chart
+        result_main_layout.addWidget(self.dashboard)
         
-        # 左：仪表盘
-        self.gauge = AIGCGaugeWidget()
-        
-        # 右：饼状图
-        self.pie_chart = AIGCPieChart()
-        
-        viz_layout.addWidget(self.gauge, 1)
-        viz_layout.addWidget(self.pie_chart, 1)
-        
-        result_main_layout.addWidget(viz_container)
-        
-        # 2. 控制栏 (只看超标 + 标题)
+        # 控制栏
         ctrl_bar = QHBoxLayout()
         self.label_output = QLabel("🔍 逐段溯源分析")
         self.label_output.setStyleSheet("font-weight: bold; font-size: 14px;")
-        
         self.chk_only_high_risk = QCheckBox("只显示高风险内容 (>60%)")
         self.chk_only_high_risk.setCursor(Qt.PointingHandCursor)
-        self.chk_only_high_risk.stateChanged.connect(self.apply_filter) # 连接过滤信号
-        
+        self.chk_only_high_risk.stateChanged.connect(self.apply_filter) 
         ctrl_bar.addWidget(self.label_output)
         ctrl_bar.addStretch()
         ctrl_bar.addWidget(self.chk_only_high_risk)
         ctrl_bar.addSpacing(10)
-        
         result_main_layout.addLayout(ctrl_bar)
         
-        # 3. 结果列表
+        # 结果列表
         self.result_scroll = QScrollArea()
         self.result_scroll.setWidgetResizable(True)
         self.result_scroll.setFrameShape(QFrame.NoFrame)
         self.result_container = QWidget()
         self.result_layout = QVBoxLayout(self.result_container)
         self.result_layout.setAlignment(Qt.AlignTop)
-        self.result_layout.setSpacing(10) # 间距缩小一点
+        self.result_layout.setSpacing(10)
         self.result_scroll.setWidget(self.result_container)
-        
         result_main_layout.addWidget(self.result_scroll)
         
-        # 热力导航条 (Heatmap Bar)
+        # 热力导航条
         self.heatmap = HeatmapBar()
-        self.heatmap.clicked_section.connect(self.scroll_to_section) # 连接跳转信号
+        self.heatmap.clicked_section.connect(self.scroll_to_section) 
 
         output_outer_layout.addWidget(result_main_widget)
-        output_outer_layout.addWidget(self.heatmap) # 添加到右侧
+        output_outer_layout.addWidget(self.heatmap)
 
         splitter.addWidget(self.card_input)
         splitter.addWidget(self.card_output)
         splitter.setSizes([600, 500])
         layout.addWidget(splitter, stretch=1)
 
+        # ------------------ 底部状态栏 ------------------
         status_bar = QFrame()
-        status_bar.setFixedHeight(30)
+        # 压缩底部状态栏高度 30 -> 24
+        status_bar.setFixedHeight(24)
         sb_layout = QHBoxLayout(status_bar)
         sb_layout.setContentsMargins(0,0,0,0)
+        
         self.status_icon = QLabel("●")
         self.status_text = QLabel("初始化...")
-        self.status_text.setStyleSheet("font-size: 12px; font-weight: bold;")
+        self.status_text.setStyleSheet("font-size: 11px; font-weight: bold;")
+        
         self.btn_refresh = QPushButton("🔄 刷新状态")
         self.btn_refresh.setCursor(Qt.PointingHandCursor)
-        self.btn_refresh.setFixedSize(80, 24)
+        self.btn_refresh.setFixedSize(76, 22) # 更迷你的按钮
         self.btn_refresh.clicked.connect(self.manual_refresh_model)
+        
         sb_layout.addWidget(self.status_icon)
         sb_layout.addWidget(self.status_text)
         sb_layout.addWidget(self.btn_refresh)
         sb_layout.addStretch()
+        
         self.label_device = QLabel("")
         self.label_device.setStyleSheet("color: #666; font-size: 11px; margin-right: 10px;")
         sb_layout.addWidget(self.label_device)
+        
         self.progress_bar = ModernProgressBar()
         self.progress_bar.setFixedWidth(300)
         sb_layout.addWidget(self.progress_bar)
         layout.addWidget(status_bar)
 
+    # ------------------ 模型调度与交互 ------------------
     def manual_refresh_model(self):
         self.status_text.setText("正在扫描本地模型...")
         self.status_text.setStyleSheet("color: #FFD60A; font-weight: bold;")
@@ -350,16 +209,16 @@ class AIGCSentinel(QMainWindow):
             has_bin = "pytorch_model.bin" in files or "model.safetensors" in files
             if has_config and has_bin:
                 self.is_model_valid = True; self.model_path = target_dir
-                self.status_icon.setStyleSheet(f"color: #00E070; font-size: 16px;")
+                self.status_icon.setStyleSheet(f"color: #00E070; font-size: 14px;")
                 self.status_text.setText("本地引擎已加载")
                 self.status_text.setStyleSheet("color: #30D158; font-weight: bold;")
-            else: self.set_model_invalid(f"缺失文件")
+            else: self.set_model_invalid(f"缺失核心文件")
         except Exception as e: self.set_model_invalid(f"读取失败: {str(e)}")
 
     def set_model_invalid(self, reason):
         self.is_model_valid = False
         self.model_path = ""
-        self.status_icon.setStyleSheet(f"color: #FF453A; font-size: 16px;")
+        self.status_icon.setStyleSheet(f"color: #FF453A; font-size: 14px;")
         self.status_text.setText(f"⚠️ 无法检测: {reason}")
         self.status_text.setStyleSheet("color: #FF453A; font-weight: bold;")
 
@@ -368,6 +227,7 @@ class AIGCSentinel(QMainWindow):
         color = "#00E070" if is_gpu else "#FFD60A"
         self.label_device.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 11px; margin-right: 15px;")
 
+    # ------------------ 主题与界面渲染 ------------------
     def toggle_theme(self, is_dark):
         pixmap = self.grab()
         self.transition_overlay.setPixmap(pixmap)
@@ -378,15 +238,13 @@ class AIGCSentinel(QMainWindow):
         Theme.toggle()
         self.update_theme()
         
-        self.gauge.update()
-        self.pie_chart.update()
+        self.dashboard.update_style()
         self.btn_import.update()
         self.btn_clear.update()
         self.btn_detect.update()
         self.progress_bar.update()
         self.input_edit.update()
         
-        # 1. 刷新所有卡片样式 (修复颜色不同步问题)
         for i in range(self.result_layout.count()):
             item = self.result_layout.itemAt(i)
             if item.widget() and isinstance(item.widget(), ResultBlock):
@@ -423,19 +281,25 @@ class AIGCSentinel(QMainWindow):
             QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {t['border']}; }}
             QCheckBox::indicator:checked {{ background-color: #2D79FF; border-color: #2D79FF; image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwb2x5bGluZSBwb2ludHM9IjIwIDYgOSAxNyA0IDEyIi8+PC9zdmc+); }}
         """)
-        self.title_lbl.setStyleSheet(f"font-size: 28px; font-weight: 900; color: {t['text_main']};")
+        self.title_lbl.setStyleSheet(f"font-size: 24px; font-weight: 900; color: {t['text_main']};")
         self.label_input.setStyleSheet(f"color: {t['text_sub']}; font-weight: bold; margin-bottom: 5px;")
+        
         card_style = f"QFrame {{ background-color: {t['bg_card']}; border: 1px solid {t['border']}; border-radius: 16px; }}"
         self.card_input.setStyleSheet(card_style)
         self.card_output.setStyleSheet(card_style)
         self.card_input.setGraphicsEffect(Theme.shadow(30))
         self.card_output.setGraphicsEffect(Theme.shadow(30))
+        
+        if hasattr(self, 'dashboard'):
+            self.dashboard.update_style()
+            
         btn_bg = "#333" if Theme.CURRENT_MODE == 'dark' else "#DDD"
         btn_txt = "#FFF" if Theme.CURRENT_MODE == 'dark' else "#333"
         self.btn_refresh.setStyleSheet(f"QPushButton {{ background: {btn_bg}; color: {btn_txt}; border-radius: 4px; border: none; font-size: 11px; }} QPushButton:hover {{ background: #2D79FF; color: white; }}")
 
     def resizeEvent(self, event):
-        if hasattr(self, 'transition_overlay') and self.transition_overlay.isVisible(): self.transition_overlay.setGeometry(0, 0, self.width(), self.height())
+        if hasattr(self, 'transition_overlay') and self.transition_overlay.isVisible(): 
+            self.transition_overlay.setGeometry(0, 0, self.width(), self.height())
         super().resizeEvent(event)
 
     def clear_content(self):
@@ -448,17 +312,25 @@ class AIGCSentinel(QMainWindow):
         self.heatmap.set_data([])
         self.pie_chart.set_data([0, 0, 0])
 
+    # ------------------ 业务逻辑与算法交互 ------------------
     def run_detection(self):
         if not self.is_model_valid: QMessageBox.critical(self, "无法运行", f"未检测到完整模型。"); return
         text = self.input_edit.toPlainText().strip()
-        if not text: self.btn_detect.setText("⚠️ 内容为空"); QTimer.singleShot(1500, lambda: self.btn_detect.setText("⚡ 开始深度检测")); return
+        if not text: 
+            self.btn_detect.setText("⚠️ 内容为空")
+            QTimer.singleShot(1500, lambda: self.btn_detect.setText("⚡ 开始深度检测"))
+            return
+            
         self.btn_detect.setEnabled(False)
         self.btn_detect.setText("正在分析...")
+        
         while self.result_layout.count():
             item = self.result_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
+            
         self.gauge.setValue(0)
         self.progress_bar.setValue(0)
+        
         self.thread = AIGCDetectionThread(text, self.model_path)
         self.thread.status_signal.connect(lambda s: self.status_text.setText(s))
         self.thread.progress_signal.connect(self.progress_bar.setValue)
@@ -485,22 +357,17 @@ class AIGCSentinel(QMainWindow):
             block = ResultBlock(i, p["content"], p["ai_rate"], is_ignored=p.get("is_ignored", False))
             block.request_scroll.connect(self.handle_block_resize) 
             block.request_highlight.connect(self.highlight_source_text) 
-            
-            # 2. 连接展开信号，实现手风琴效果
             block.expanded.connect(self.on_block_expanded)
-            
             self.result_layout.addWidget(block)
             
         self.result_layout.addStretch()
         self.apply_filter()
 
-    # 新增：处理卡片展开 (实现互斥)
     def on_block_expanded(self, expanded_index):
         for i in range(self.result_layout.count()):
             item = self.result_layout.itemAt(i)
             widget = item.widget()
             if widget and isinstance(widget, ResultBlock):
-                # 这里的 index 是我们在初始化 ResultBlock 时传入的序号
                 if widget.index != expanded_index and widget.is_expanded:
                     widget.set_expanded(False)
 
@@ -574,6 +441,11 @@ class AIGCSentinel(QMainWindow):
 
 if __name__ == "__main__":
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
-    app = QApplication(sys.argv); app.setStyle("Fusion")
-    font = QFont("Microsoft YaHei", 10); font.setStyleStrategy(QFont.PreferAntialias); app.setFont(font)
-    window = AIGCSentinel(); window.show(); sys.exit(app.exec())
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    font = QFont("Microsoft YaHei", 10)
+    font.setStyleStrategy(QFont.PreferAntialias)
+    app.setFont(font)
+    window = AIGCSentinel()
+    window.show()
+    sys.exit(app.exec())

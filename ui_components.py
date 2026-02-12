@@ -2,10 +2,10 @@ import math
 import html
 import os
 from PySide6.QtWidgets import (
-    QWidget, QPushButton, QLabel, QFrame, QTextEdit, QHBoxLayout, QVBoxLayout, QSizePolicy, QGraphicsDropShadowEffect
+    QWidget, QPushButton, QLabel, QFrame, QTextEdit, QHBoxLayout, QVBoxLayout, QSizePolicy, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QScrollArea
 )
 from PySide6.QtCore import (
-    Qt, Property, QPropertyAnimation, QEasingCurve, QRectF, QPointF, Signal, QSize
+    Qt, Property, QPropertyAnimation, QEasingCurve, QRectF, QPointF, Signal, QSize, QTimer
 )
 from PySide6.QtGui import (
     QColor, QPainter, QFont, QPen, QBrush, QLinearGradient, QRadialGradient,
@@ -71,23 +71,20 @@ class Theme:
 # ---------------------- 基础 UI 组件 ----------------------
 
 class ThemeSwitch(QWidget):
-    """日夜模式切换开关"""
     toggled = Signal(bool) 
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(60, 32)
+        self.setFixedSize(48, 24)
         self.setCursor(Qt.PointingHandCursor)
         self._is_dark = True
-        self._thumb_x = 30 
+        self._thumb_x = 26 
         self.anim = QPropertyAnimation(self, b"thumb_pos", self)
         self.anim.setDuration(250)
         self.anim.setEasingCurve(QEasingCurve.InOutQuad)
 
     @Property(float)
-    def thumb_pos(self):
-        return self._thumb_x
-    
+    def thumb_pos(self): return self._thumb_x
     @thumb_pos.setter
     def thumb_pos(self, val):
         self._thumb_x = val
@@ -97,7 +94,7 @@ class ThemeSwitch(QWidget):
         if event.button() == Qt.LeftButton:
             self._is_dark = not self._is_dark
             start = self._thumb_x
-            end = 30 if self._is_dark else 4
+            end = 26 if self._is_dark else 2 
             self.anim.stop()
             self.anim.setStartValue(start)
             self.anim.setEndValue(end)
@@ -108,72 +105,58 @@ class ThemeSwitch(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         
-        # 轨道
         track_color = QColor("#333333") if self._is_dark else QColor("#D0D0D0")
         p.setBrush(track_color)
         p.setPen(Qt.NoPen)
-        p.drawRoundedRect(0, 0, 56, 28, 14, 14)
+        p.drawRoundedRect(0, 0, 48, 24, 12, 12)
         
-        # 图标
-        p.setFont(QFont("Segoe UI Emoji", 10))
+        p.setFont(QFont("Segoe UI Emoji", 9)) 
         if self._is_dark:
             p.setPen(QColor("#666"))
-            p.drawText(8, 19, "☀️")
+            p.drawText(6, 17, "☀️")
         else:
             p.setPen(QColor("#FFF"))
-            p.drawText(36, 19, "🌙")
+            p.drawText(28, 17, "🌙")
 
-        # 滑块
         thumb_color = QColor("#121214") if self._is_dark else QColor("#FFFFFF")
         p.setBrush(thumb_color)
-        p.drawEllipse(int(self._thumb_x), 2, 24, 24)
+        p.drawEllipse(int(self._thumb_x), 2, 20, 20)
 
 class ThreeDButton(QPushButton):
-    """3D 立体按钮"""
     def __init__(self, text, is_primary=True, parent=None):
         super().__init__(text, parent)
         self.setCursor(Qt.PointingHandCursor)
-        self.setFixedHeight(50)
-        self.setFont(QFont("Microsoft YaHei UI", 10, QFont.Weight.Bold))
+        self.setFixedHeight(36) 
+        self.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.Bold)) 
         self._is_primary = is_primary
         self._is_pressed = False
-        self._offset_y = 5 
+        self._offset_y = 3 
         
         self._hover_progress = 0.0
         self.anim = QPropertyAnimation(self, b"hover_progress", self)
         self.anim.setDuration(150)
 
     @Property(float)
-    def hover_progress(self):
-        return self._hover_progress
-    
+    def hover_progress(self): return self._hover_progress
     @hover_progress.setter
     def hover_progress(self, val):
         self._hover_progress = val
         self.update()
 
     def enterEvent(self, e):
-        self.anim.stop()
-        self.anim.setEndValue(1.0)
-        self.anim.start()
+        self.anim.stop(); self.anim.setEndValue(1.0); self.anim.start()
         super().enterEvent(e)
 
     def leaveEvent(self, e):
-        self.anim.stop()
-        self.anim.setEndValue(0.0)
-        self.anim.start()
+        self.anim.stop(); self.anim.setEndValue(0.0); self.anim.start()
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self._is_pressed = True
-            self.update()
+        if e.button() == Qt.LeftButton: self._is_pressed = True; self.update()
         super().mousePressEvent(e)
 
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self._is_pressed = False
-            self.update()
+        if e.button() == Qt.LeftButton: self._is_pressed = False; self.update()
         super().mouseReleaseEvent(e)
 
     def paintEvent(self, event):
@@ -182,90 +165,60 @@ class ThreeDButton(QPushButton):
         w, h = self.width(), self.height()
         
         if self._is_primary:
-            face_color = QColor(Theme.get('btn_face'))
-            side_color = QColor(Theme.get('btn_side'))
-            text_color = QColor("white")
+            face_color, side_color, text_color = QColor(Theme.get('btn_face')), QColor(Theme.get('btn_side')), QColor("white")
         else:
-            face_color = QColor(Theme.get('btn_sec_face'))
-            side_color = QColor(Theme.get('btn_sec_side'))
+            face_color, side_color = QColor(Theme.get('btn_sec_face')), QColor(Theme.get('btn_sec_side'))
             text_color = QColor("white") if Theme.CURRENT_MODE == 'dark' else QColor("#333")
 
         if self._hover_progress > 0:
-            face_color = face_color.lighter(105)
-            side_color = side_color.lighter(105)
+            face_color = face_color.lighter(105); side_color = side_color.lighter(105)
         
-        # 计算 3D 偏移
-        current_offset = self._offset_y if not self._is_pressed else 2
+        current_offset = self._offset_y if not self._is_pressed else 1
         face_h = h - self._offset_y
         
-        # 侧面 (阴影层)
         path_side = QPainterPath()
-        path_side.addRoundedRect(QRectF(0, self._offset_y, w, face_h), 12, 12)
-        painter.setBrush(side_color)
-        painter.setPen(Qt.NoPen)
-        painter.drawPath(path_side)
+        path_side.addRoundedRect(QRectF(0, self._offset_y, w, face_h), 8, 8) 
+        painter.setBrush(side_color); painter.setPen(Qt.NoPen); painter.drawPath(path_side)
 
-        # 正面
-        top_y = 0 if not self._is_pressed else (self._offset_y - 2)
+        top_y = 0 if not self._is_pressed else (self._offset_y - 1)
         rect_face = QRectF(0, top_y, w, face_h)
-        painter.setBrush(face_color)
-        painter.drawRoundedRect(rect_face, 12, 12)
+        painter.setBrush(face_color); painter.drawRoundedRect(rect_face, 8, 8)
         
-        # 文字
         painter.setPen(text_color)
         painter.drawText(rect_face, Qt.AlignCenter, self.text())
 
 class ModernProgressBar(QWidget):
-    """渐变进度条"""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(6)
+        self.setFixedHeight(4) 
         self._value = 0
-
-    def setValue(self, v):
-        self._value = v
-        self.update()
-
+    def setValue(self, v): self._value = v; self.update()
     def paintEvent(self, event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p = QPainter(self); p.setRenderHint(QPainter.Antialiasing)
         rect = self.rect()
-        
         bg_c = QColor("#333") if Theme.CURRENT_MODE == 'dark' else QColor("#DDD")
-        p.setBrush(bg_c)
-        p.setPen(Qt.NoPen)
-        p.drawRoundedRect(rect, 3, 3)
-        
+        p.setBrush(bg_c); p.setPen(Qt.NoPen); p.drawRoundedRect(rect, 2, 2)
         if self._value <= 0: return
-        
         w = rect.width() * (self._value / 100.0)
         grad = QLinearGradient(0, 0, w, 0)
-        grad.setColorAt(0, QColor("#2D79FF"))
-        grad.setColorAt(1, QColor("#00F0FF"))
-        
-        p.setBrush(grad)
-        p.drawRoundedRect(QRectF(0, 0, w, rect.height()), 3, 3)
+        grad.setColorAt(0, QColor("#2D79FF")); grad.setColorAt(1, QColor("#00F0FF"))
+        p.setBrush(grad); p.drawRoundedRect(QRectF(0, 0, w, rect.height()), 2, 2)
 
 # ---------------------- 复杂可视化组件 ----------------------
 
 class AIGCGaugeWidget(QWidget):
-    """AI率仪表盘"""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(200)
+        self.setMinimumHeight(150)
         self._value = 0
-        
         self.animation = QPropertyAnimation(self, b"value")
         self.animation.setDuration(800)
         self.animation.setEasingCurve(QEasingCurve.OutCubic) 
 
     @Property(float)
     def value(self): return self._value
-    
     @value.setter
-    def value(self, v):
-        self._value = v
-        self.update()
+    def value(self, v): self._value = v; self.update()
 
     def setValue(self, v):
         self.animation.stop()
@@ -282,199 +235,322 @@ class AIGCGaugeWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         
-        w, h = self.width(), self.height()
-        side = min(w, h * 1.5)
-        p.translate(w / 2, h * 0.85)
-        scale = side / 320
+        logical_w, logical_h = 280.0, 190.0 
+        pad = 10
+        avail_w = max(1, self.width() - pad * 2)
+        avail_h = max(1, self.height() - pad * 2)
+        
+        scale = min(avail_w / logical_w, avail_h / logical_h)
+        offset_x = pad + (avail_w - logical_w * scale) / 2.0
+        offset_y = pad + (avail_h - logical_h * scale) / 2.0
+        
+        p.translate(offset_x, offset_y)
         p.scale(scale, scale)
+        p.translate(140, 170) 
 
         color = self.get_color(self._value)
         
-        # 光晕
         alpha = 40 if Theme.CURRENT_MODE == 'dark' else 10
         glow = QRadialGradient(0, 0, 150)
         glow.setColorAt(0, QColor(color.red(), color.green(), color.blue(), alpha))
         glow.setColorAt(1, QColor(color.red(), color.green(), color.blue(), 0))
-        p.setBrush(glow)
-        p.setPen(Qt.NoPen)
-        p.drawEllipse(-150, -150, 300, 300)
+        p.setBrush(glow); p.setPen(Qt.NoPen); p.drawEllipse(-150, -150, 300, 300)
 
-        # 标题
+        if self._value < 30: verdict = "人类文本"
+        elif self._value < 60: verdict = "疑似混写"
+        else: verdict = "疑似AI"
+
         p.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        fm = QFontMetrics(p.font())
+        title_str = "整体疑似度  " 
+        title_w = fm.horizontalAdvance(title_str)
+        verdict_w = fm.horizontalAdvance(verdict)
+        total_w = title_w + verdict_w
+        
+        start_x = -total_w / 2
         p.setPen(QColor(Theme.get('text_sub')))
-        p.drawText(QRectF(-100, -170, 200, 30), Qt.AlignCenter, "整体疑似度")
+        p.drawText(QRectF(start_x, -165, title_w, 30), Qt.AlignLeft | Qt.AlignVCenter, title_str)
+        p.setPen(color)
+        p.drawText(QRectF(start_x + title_w, -165, verdict_w, 30), Qt.AlignLeft | Qt.AlignVCenter, verdict)
 
-        # 轨道背景
         track_c = QColor(40, 40, 45) if Theme.CURRENT_MODE == 'dark' else QColor(220, 220, 220)
         p.setPen(QPen(track_c, 18, Qt.SolidLine, Qt.RoundCap))
         p.drawArc(QRectF(-110, -110, 220, 220), 180 * 16, -180 * 16)
 
-        # 进度条
         p.setPen(QPen(color, 18, Qt.SolidLine, Qt.RoundCap))
         span = -(self._value / 100.0) * 180 * 16
         p.drawArc(QRectF(-110, -110, 220, 220), 180 * 16, span)
 
-        # 数值
         p.setPen(QColor(Theme.get('text_main')))
         p.setFont(QFont("Segoe UI", 42, QFont.Bold))
         p.drawText(QRectF(-100, -80, 200, 60), Qt.AlignCenter, f"{int(self._value)}%")
 
-        # 指针
         p.save()
         angle = (self._value / 100.0) * 180 - 90
         p.rotate(angle)
-        
         pointer_c = QColor("white") if Theme.CURRENT_MODE == 'dark' else QColor("#333")
-        p.setBrush(QBrush(pointer_c))
-        p.setPen(Qt.NoPen)
-        
-        # 指针形状 (QPolygonF 需要 PySide6.QtGui.QPolygonF)
+        p.setBrush(QBrush(pointer_c)); p.setPen(Qt.NoPen)
         p.drawPolygon(QPolygonF([QPointF(-6, 0), QPointF(6, 0), QPointF(0, -98)]))
-        
-        # 中心圆点
-        p.setBrush(QBrush(QColor(Theme.get('bg_card'))))
+        p.setBrush(QBrush(QColor(Theme.get('bg_main')))) 
         p.setPen(QPen(pointer_c, 3))
         p.drawEllipse(-8, -8, 16, 16)
         p.restore()
 
 class AIGCPieChart(QWidget):
-    """分布饼图"""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(220, 180)
-        self.counts = [0, 0, 0] # Human, Mixed, AI
+        self.setMinimumSize(150, 150) 
+        self.counts = [0, 0, 0]
         self.labels = ["人类文本", "疑似混写", "疑似AI"]
         self.colors = [Theme.ACCENT_GREEN, Theme.ACCENT_YELLOW, Theme.ACCENT_RED]
         self.hovered_idx = -1
         
         self._anim_progress = 0.0
         self.anim = QPropertyAnimation(self, b"anim_progress", self)
-        self.anim.setDuration(1000)
-        self.anim.setEasingCurve(QEasingCurve.OutElastic)
+        self.anim.setDuration(1200)
+        self.anim.setEasingCurve(QEasingCurve.OutQuart)
         self.setMouseTracking(True)
+        
+        self.hover_offsets = [0.0, 0.0, 0.0]
+        self.target_offsets = [0.0, 0.0, 0.0]
+        self.hover_timer = QTimer(self)
+        self.hover_timer.timeout.connect(self._smooth_hover_anim)
+        self.hover_timer.start(16)
 
     @Property(float)
-    def anim_progress(self):
-        return self._anim_progress
-    
+    def anim_progress(self): return self._anim_progress
     @anim_progress.setter
-    def anim_progress(self, val):
+    def anim_progress(self, val): 
         self._anim_progress = val
         self.update()
 
+    def _smooth_hover_anim(self):
+        needs_update = False
+        for i in range(3):
+            diff = self.target_offsets[i] - self.hover_offsets[i]
+            if abs(diff) > 0.05:
+                self.hover_offsets[i] += diff * 0.15 
+                needs_update = True
+            else:
+                if self.hover_offsets[i] != self.target_offsets[i]:
+                    self.hover_offsets[i] = self.target_offsets[i]
+                    needs_update = True
+        if needs_update: self.update()
+
     def set_data(self, counts):
         self.counts = counts
-        self.anim.stop()
-        self.anim.setStartValue(0.0)
-        self.anim.setEndValue(1.0)
-        self.anim.start()
+        self.anim.stop(); self.anim.setStartValue(0.0); self.anim.setEndValue(1.0); self.anim.start()
+
+    def _get_logical_params(self):
+        logical_w, logical_h = 320.0, 190.0
+        pad = 5
+        avail_w = max(1, self.width() - pad * 2)
+        avail_h = max(1, self.height() - pad * 2)
+        
+        scale = min(avail_w / logical_w, avail_h / logical_h)
+        offset_x = pad + (avail_w - logical_w * scale) / 2.0
+        offset_y = pad + (avail_h - logical_h * scale) / 2.0
+        return logical_w, logical_h, scale, offset_x, offset_y
 
     def mouseMoveEvent(self, event):
-        # 饼图中心点 (偏右)
-        center = QPointF(self.width() * 0.65, self.height() / 2)
+        logical_w, logical_h, scale, offset_x, offset_y = self._get_logical_params()
+        
         pos = event.position()
-        dx = pos.x() - center.x()
-        dy = pos.y() - center.y()
+        lx = (pos.x() - offset_x) / scale
+        ly = (pos.y() - offset_y) / scale
+        
+        center_x, center_y = 220.0, 105.0 
+        base_radius = 85.0
+        inner_radius = base_radius * 0.6 
+        
+        dx = lx - center_x
+        dy = ly - center_y
         dist = math.sqrt(dx*dx + dy*dy)
         
-        radius = min(self.width(), self.height()) * 0.35
-        if dist <= radius:
-            angle = math.degrees(math.atan2(-dy, dx))
-            if angle < 0: angle += 360
+        new_hover_idx = -1
+        if inner_radius - 5 <= dist <= base_radius + 25: 
+            math_angle = math.degrees(math.atan2(-dy, dx))
+            sweep_angle = (90 - math_angle) % 360
             
             total = sum(self.counts)
-            if total == 0: 
-                self.hovered_idx = -1
-                self.update()
-                return
-
-            current_angle = 0
-            for i, count in enumerate(self.counts):
-                span = (count / total) * 360
-                if current_angle <= angle < current_angle + span:
-                    self.hovered_idx = i
-                    self.update()
-                    return
-                current_angle += span
+            if total > 0:
+                current_angle = 0
+                for i, count in enumerate(self.counts):
+                    span = (count / total) * 360
+                    if current_angle <= sweep_angle < current_angle + span:
+                        if dist <= base_radius + self.hover_offsets[i] + 5:
+                            new_hover_idx = i
+                        break
+                    current_angle += span
         
-        if self.hovered_idx != -1:
-            self.hovered_idx = -1
-            self.update()
+        if new_hover_idx != self.hovered_idx:
+            self.hovered_idx = new_hover_idx
+            for i in range(3):
+                self.target_offsets[i] = 12.0 if i == self.hovered_idx else 0.0
 
     def leaveEvent(self, event):
         self.hovered_idx = -1
-        self.update()
+        for i in range(3): self.target_offsets[i] = 0.0
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         
-        w, h = self.width(), self.height()
-        center_x = w * 0.65
-        center_y = h / 2
-        radius = min(w, h) * 0.35 * self._anim_progress
+        logical_w, logical_h, scale, offset_x, offset_y = self._get_logical_params()
+        
+        p.translate(offset_x, offset_y)
+        p.scale(scale, scale)
+        
+        p.setOpacity(self._anim_progress)
+        p.setFont(QFont("Microsoft YaHei", 12, QFont.Bold))
+        p.setPen(QColor(Theme.get('text_sub')))
+        p.drawText(QRectF(15, 10, logical_w - 30, 30), Qt.AlignLeft | Qt.AlignVCenter, "段落成分分布")
+        
+        center_x, center_y = 220.0, 105.0
+        base_radius = 85.0 
         
         total = sum(self.counts)
         if total == 0:
-            # 空数据显示
             p.setPen(QPen(QColor(60,60,60), 4))
-            p.drawEllipse(QPointF(center_x, center_y), radius, radius)
+            p.drawEllipse(QPointF(center_x, center_y), base_radius, base_radius)
             return
 
-        start_angle = 0
+        start_angle = 90 * 16 
+        accumulated_fraction = 0.0 
         
-        # 绘制扇区
         for i, count in enumerate(self.counts):
-            span_angle = (count / total) * 360 * 16 # drawPie 使用 1/16 度单位
+            segment_fraction = count / total
+            if self._anim_progress <= accumulated_fraction:
+                break
+            allowed_fraction = min(segment_fraction, self._anim_progress - accumulated_fraction)
+            span_angle = - (allowed_fraction * 360 * 16) 
             
-            # 悬停凸起效果
-            r = radius + (5 if i == self.hovered_idx else 0)
+            offset = self.hover_offsets[i]
+            r = base_radius + offset 
             
             c = QColor(self.colors[i])
-            if i == self.hovered_idx:
-                c = c.lighter(120)
-            else:
-                c.setAlpha(200)
+            lightness = 100 + int((offset / 12.0) * 20)
+            alpha = 200 + int((offset / 12.0) * 55)
+            c = c.lighter(lightness); c.setAlpha(alpha)
             
-            p.setBrush(c)
-            p.setPen(Qt.NoPen)
-            
+            p.setBrush(c); p.setPen(Qt.NoPen)
             rect = QRectF(center_x - r, center_y - r, r*2, r*2)
             p.drawPie(rect, start_angle, int(span_angle))
             
-            start_angle += int(span_angle)
+            start_angle += int(-segment_fraction * 360 * 16)
+            accumulated_fraction += segment_fraction
 
-        # 绘制图例 (左侧)
-        legend_x = 20
-        legend_y = h / 2 - 30
-        p.setFont(QFont("Microsoft YaHei", 9))
+        inner_radius = base_radius * 0.6
+        p.setBrush(QColor(Theme.get('bg_main'))) 
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(QPointF(center_x, center_y), inner_radius, inner_radius)
+
+        p.setOpacity(self._anim_progress)
+        if self._anim_progress > 0.6: 
+            if self.hovered_idx != -1:
+                pct = int(self.counts[self.hovered_idx] / total * 100) if total else 0
+                p.setPen(QColor(self.colors[self.hovered_idx]).lighter(110))
+                p.setFont(QFont("Segoe UI", 18, QFont.Bold))
+                p.drawText(QRectF(center_x - 45, center_y - 20, 90, 40), Qt.AlignCenter, f"{pct}%")
+            else:
+                p.setPen(QColor(Theme.get('text_sub')))
+                p.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+                p.drawText(QRectF(center_x - 45, center_y - 20, 90, 40), Qt.AlignCenter, f"共 {total} 段")
+
+        legend_x = 15.0
+        legend_y = 65.0
         
         for i, label in enumerate(self.labels):
             c = QColor(self.colors[i])
-            p.setBrush(c)
-            p.drawRoundedRect(legend_x, int(legend_y + i*25), 12, 12, 3, 3)
+            offset = self.hover_offsets[i]
+            box_x = legend_x + (offset * 0.5) 
             
-            p.setPen(QColor(Theme.get('text_main')))
-            count_text = f"{label}: {self.counts[i]}"
+            p.setBrush(c); p.setPen(Qt.NoPen)
+            p.drawRoundedRect(QRectF(box_x, legend_y + i*32, 14, 14), 3, 3) 
             
+            text_c = QColor(Theme.get('text_main'))
             if i == self.hovered_idx:
-                p.setFont(QFont("Microsoft YaHei", 9, QFont.Bold))
-                p.setPen(c)
+                p.setFont(QFont("Microsoft YaHei", 11, QFont.Bold)); text_c = c.lighter(110)
             else:
-                p.setFont(QFont("Microsoft YaHei", 9))
+                p.setFont(QFont("Microsoft YaHei", 11)); text_c.setAlpha(180) 
                 
-            p.drawText(legend_x + 20, int(legend_y + i*25 + 10), count_text)
+            p.setPen(text_c)
+            p.drawText(QRectF(box_x + 24, legend_y + i*32 - 2, 120, 18), Qt.AlignLeft | Qt.AlignVCenter, f"{label}: {self.counts[i]}")
+
+class StatsDashboard(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(5, 5, 5, 5)
+        self.layout.setSpacing(0)
+        
+        self.gauge = AIGCGaugeWidget()
+        self.pie_chart = AIGCPieChart()
+        
+        self.divider = QFrame()
+        self.divider.setFixedWidth(1)
+        
+        self.layout.addWidget(self.gauge, 1)
+        self.layout.addWidget(self.divider)
+        self.layout.addWidget(self.pie_chart, 1)
+        
+    def update_style(self):
+        self.setStyleSheet("StatsDashboard { background: transparent; border: none; }")
+        self.divider.setStyleSheet(f"""
+            QFrame {{
+                background-color: {Theme.get('border')};
+                margin: 15px 0px;
+            }}
+        """)
+        self.gauge.update()
+        self.pie_chart.update()
 
 class HeatmapBar(QWidget):
-    """热力导航条"""
     clicked_section = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(16)
+        self.setFixedWidth(24) 
         self.data = [] 
         self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet("background-color: rgba(0,0,0,0.1); border-radius: 4px;")
+        self.setMouseTracking(True)
+        
+        self._anim_progress = 0.0
+        self.anim = QPropertyAnimation(self, b"anim_progress", self)
+        self.anim.setDuration(1200) 
+        self.anim.setEasingCurve(QEasingCurve.OutExpo)
+
+        self.hover_width = 6.0 
+        self.target_width = 6.0
+        self.hovered_idx = -1
+        self.block_offsets = []
+        
+        self.hover_timer = QTimer(self)
+        self.hover_timer.timeout.connect(self._smooth_anim)
+        self.hover_timer.start(16)
+
+    @Property(float)
+    def anim_progress(self): return self._anim_progress
+    @anim_progress.setter
+    def anim_progress(self, val): 
+        self._anim_progress = val
+        self.update()
+
+    def _smooth_anim(self):
+        needs_update = False
+        diff = self.target_width - self.hover_width
+        if abs(diff) > 0.05:
+            self.hover_width += diff * 0.2
+            needs_update = True
+            
+        for i in range(len(self.block_offsets)):
+            target = 8.0 if i == self.hovered_idx else 0.0 
+            diff_b = target - self.block_offsets[i]
+            if abs(diff_b) > 0.05:
+                self.block_offsets[i] += diff_b * 0.25
+                needs_update = True
+
+        if needs_update: self.update()
 
     def set_data(self, paragraphs):
         self.data = []
@@ -495,39 +571,83 @@ class HeatmapBar(QWidget):
                 "color": c,
                 "weight": length / total_len
             })
-        self.update()
-
-    def paintEvent(self, event):
-        if not self.data: return
-        p = QPainter(self)
-        p.setPen(Qt.NoPen)
         
-        h = self.height()
-        w = self.width()
-        current_y = 0.0
+        self.block_offsets = [0.0] * len(self.data)
+        self.hovered_idx = -1
         
-        for item in self.data:
-            block_h = max(2.0, item['weight'] * h)
-            p.setBrush(item['color'])
-            # 留一点间隙
-            p.drawRect(2, int(current_y), w-4, int(block_h))
-            current_y += block_h 
+        self.anim.stop()
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.start()
 
-    def mousePressEvent(self, event):
+    def enterEvent(self, event):
+        self.target_width = 12.0 
+        
+    def leaveEvent(self, event):
+        self.target_width = 6.0  
+        self.hovered_idx = -1
+
+    def mouseMoveEvent(self, event):
         if not self.data: return
         y = event.position().y()
         h = self.height()
         
         current_y = 0.0
-        for item in self.data:
-            block_h = max(2.0, item['weight'] * h)
+        new_hover = -1
+        for i, item in enumerate(self.data):
+            block_h = max(3.0, item['weight'] * h)
             if current_y <= y <= current_y + block_h:
-                self.clicked_section.emit(item['index'])
-                return
+                new_hover = i
+                break
+            current_y += block_h
+            
+        if new_hover != self.hovered_idx:
+            self.hovered_idx = new_hover
+
+    def mousePressEvent(self, event):
+        if self.hovered_idx != -1 and self.hovered_idx < len(self.data):
+            self.clicked_section.emit(self.data[self.hovered_idx]['index'])
+
+    def paintEvent(self, event):
+        if not self.data: return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        
+        w, h = self.width(), self.height()
+        
+        visible_y_start = h * (1.0 - self._anim_progress)
+        p.setClipRect(0, int(visible_y_start), int(w), int(h))
+        
+        center_x = w / 2.0
+        
+        track_w = self.hover_width
+        track_c = QColor(Theme.get('border'))
+        track_c.setAlpha(100)
+        p.setPen(Qt.NoPen)
+        p.setBrush(track_c)
+        p.drawRoundedRect(QRectF(center_x - track_w/2, 0, track_w, h), track_w/2, track_w/2)
+
+        current_y = 0.0
+        for i, item in enumerate(self.data):
+            block_h = max(3.0, item['weight'] * h)
+            draw_h = max(1.5, block_h - 1.0) 
+            
+            current_w = track_w + self.block_offsets[i]
+            
+            c = QColor(item['color'])
+            if i == self.hovered_idx:
+                c = c.lighter(120)
+            else:
+                if self.hovered_idx != -1: c.setAlpha(120) 
+                else: c.setAlpha(200)
+
+            p.setBrush(c)
+            rect = QRectF(center_x - current_w/2, current_y + 0.5, current_w, draw_h)
+            p.drawRoundedRect(rect, current_w/2, current_w/2)
+            
             current_y += block_h
 
 class DragTextEdit(QTextEdit):
-    """支持文件拖入的文本框"""
     file_dropped = Signal(str)
     
     def __init__(self, parent=None):
@@ -548,7 +668,6 @@ class DragTextEdit(QTextEdit):
 
     @Property(float)
     def glow_strength(self): return self._glow_strength
-    
     @glow_strength.setter
     def glow_strength(self, v):
         self._glow_strength = v
@@ -556,46 +675,30 @@ class DragTextEdit(QTextEdit):
 
     @Property(float)
     def scale_factor(self): return self._scale_factor
-    
     @scale_factor.setter
     def scale_factor(self, v):
         self._scale_factor = v
         self.update()
 
     def insertFromMimeData(self, source):
-        # 强制只粘贴纯文本
-        if source.hasText():
-            self.insertPlainText(source.text())
-        else:
-            super().insertFromMimeData(source)
+        if source.hasText(): self.insertPlainText(source.text())
+        else: super().insertFromMimeData(source)
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
             e.accept()
-            self.anim_glow.stop()
-            self.anim_glow.setEndValue(1.0)
-            self.anim_glow.start()
-            self.anim_scale.stop()
-            self.anim_scale.setEndValue(1.02)
-            self.anim_scale.start()
+            self.anim_glow.stop(); self.anim_glow.setEndValue(1.0); self.anim_glow.start()
+            self.anim_scale.stop(); self.anim_scale.setEndValue(1.02); self.anim_scale.start()
         else: e.ignore()
 
     def dragLeaveEvent(self, e):
-        self.anim_glow.stop()
-        self.anim_glow.setEndValue(0.0)
-        self.anim_glow.start()
-        self.anim_scale.stop()
-        self.anim_scale.setEndValue(1.0)
-        self.anim_scale.start()
+        self.anim_glow.stop(); self.anim_glow.setEndValue(0.0); self.anim_glow.start()
+        self.anim_scale.stop(); self.anim_scale.setEndValue(1.0); self.anim_scale.start()
         super().dragLeaveEvent(e)
 
     def dropEvent(self, e):
-        self.anim_glow.stop()
-        self.anim_glow.setEndValue(0.0)
-        self.anim_glow.start()
-        self.anim_scale.stop()
-        self.anim_scale.setEndValue(1.0)
-        self.anim_scale.start()
+        self.anim_glow.stop(); self.anim_glow.setEndValue(0.0); self.anim_glow.start()
+        self.anim_scale.stop(); self.anim_scale.setEndValue(1.0); self.anim_scale.start()
         
         urls = e.mimeData().urls()
         if urls:
@@ -604,10 +707,8 @@ class DragTextEdit(QTextEdit):
             if ext in ['.txt', '.docx']:
                 self.file_dropped.emit(path)
                 e.acceptProposedAction() 
-            else:
-                e.ignore()
-        else:
-            e.ignore()
+            else: e.ignore()
+        else: e.ignore()
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -626,7 +727,7 @@ class DragTextEdit(QTextEdit):
             
     def highlight_paragraph(self, content):
         if not content: return
-        cursor = self.document().find(content[:50]) # 查找前50字
+        cursor = self.document().find(content[:50]) 
         if not cursor.isNull():
             cursor.select(QTextCursor.BlockUnderCursor)
             self.setTextCursor(cursor)
@@ -634,10 +735,13 @@ class DragTextEdit(QTextEdit):
             self.setFocus()
 
 class ResultBlock(QWidget):
-    """可折叠结果卡片"""
+    """
+    终极段落卡片:
+    引入动态预判机制，根据文字实际所需高度动态约束滚动遮罩，不留一丝冗余空间。
+    """
     request_scroll = Signal() 
     request_highlight = Signal(str)
-    expanded = Signal(int) # 新增：通知外部自己展开了
+    expanded = Signal(int)
 
     def __init__(self, index, content, ai_rate, is_ignored=False, parent=None):
         super().__init__(parent)
@@ -650,23 +754,33 @@ class ResultBlock(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.PointingHandCursor) 
         
-        # 初始化颜色
+        self.entry_effect = QGraphicsOpacityEffect(self)
+        self.entry_effect.setOpacity(0.0)
+        self.setGraphicsEffect(self.entry_effect)
+        
+        self.entry_anim = QPropertyAnimation(self.entry_effect, b"opacity")
+        self.entry_anim.setDuration(600)
+        self.entry_anim.setStartValue(0.0)
+        self.entry_anim.setEndValue(1.0)
+        self.entry_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.entry_anim.finished.connect(self._remove_opacity_effect)
+        
+        delay = min(self.index * 60, 1000)
+        QTimer.singleShot(delay, self.entry_anim.start)
+
         self.update_colors()
 
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        # 头部
+        # 头部区域
         self.header_frame = QFrame()
         self.header_layout = QHBoxLayout(self.header_frame)
-        self.header_layout.setContentsMargins(15, 12, 15, 12)
+        self.header_layout.setContentsMargins(15, 8, 15, 8)
 
         self.idx_lbl = QLabel(f"#{self.index+1}")
-        self.idx_lbl.setStyleSheet(f"font-weight: bold;") # 颜色在 update_style 中设置
-        
         self.risk_lbl = QLabel(f"{int(self.ai_rate)}% {self.verdict}")
-        self.risk_lbl.setStyleSheet(f"font-weight: 900; font-size: 11pt;")
         
         preview_text = self.content[:30].replace("\n", " ") + ("..." if len(self.content) > 30 else "")
         self.preview_lbl = QLabel(preview_text)
@@ -679,26 +793,46 @@ class ResultBlock(QWidget):
         self.header_layout.addWidget(self.preview_lbl)
         self.header_layout.addWidget(self.arrow_lbl)
 
-        # 内容
+        # 内容区域
         self.content_frame = QFrame()
         self.content_layout = QVBoxLayout(self.content_frame)
         self.content_layout.setContentsMargins(20, 15, 20, 15)
+        self.content_layout.setAlignment(Qt.AlignTop) 
         
-        self.full_text_lbl = QLabel(self.content)
+        styled_text = f"<div style='line-height: 1.6;'>{html.escape(self.content)}</div>"
+        self.full_text_lbl = QLabel(styled_text)
         self.full_text_lbl.setWordWrap(True)
         self.full_text_lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         
         self.content_layout.addWidget(self.full_text_lbl)
-        self.content_frame.hide() 
-
-        self.main_layout.addWidget(self.header_frame)
-        self.main_layout.addWidget(self.content_frame)
         
-        # 初始化样式
+        # 视口裁切层，完美防止动画抽搐
+        self.anim_wrapper = QScrollArea()
+        self.anim_wrapper.setFrameShape(QFrame.NoFrame)
+        self.anim_wrapper.setWidgetResizable(True)
+        self.anim_wrapper.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.anim_wrapper.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.anim_wrapper.setStyleSheet("background: transparent; border: none;")
+        self.anim_wrapper.setWidget(self.content_frame)
+        
+        self.main_layout.addWidget(self.header_frame)
+        self.main_layout.addWidget(self.anim_wrapper) 
+        
+        self.anim_wrapper.hide() 
+        self.anim_wrapper.setMaximumHeight(0)
+        
+        self.anim = QPropertyAnimation(self.anim_wrapper, b"maximumHeight")
+        self.anim.setDuration(300)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic) 
+        self.anim.finished.connect(self._on_anim_finished)
+
         self.update_style()
 
+    def _remove_opacity_effect(self):
+        self.setGraphicsEffect(None)
+        self.update()
+
     def update_colors(self):
-        """计算当前应该使用的颜色"""
         if self.is_ignored:
             self.accent_color = Theme.ACCENT_GRAY
             self.verdict = "过短忽略"
@@ -717,22 +851,23 @@ class ResultBlock(QWidget):
             self.header_text_color = Theme.ACCENT_RED
 
     def update_style(self):
-        """刷新样式表 (用于主题切换或初始化)"""
-        self.update_colors() # 确保颜色是最新的
+        self.update_colors()
         
-        # 刷新子控件颜色
         self.idx_lbl.setStyleSheet(f"color: {Theme.get('text_sub')}; font-weight: bold;")
         self.risk_lbl.setStyleSheet(f"color: {self.header_text_color}; font-weight: 900; font-size: 11pt;")
         self.preview_lbl.setStyleSheet(f"color: {Theme.get('text_sub')}; margin-left: 10px;")
         self.arrow_lbl.setStyleSheet(f"color: {Theme.get('text_sub')};")
-        self.full_text_lbl.setStyleSheet(f"color: {Theme.get('text_main')}; font-size: 10pt; line-height: 1.6;")
+        self.full_text_lbl.setStyleSheet(f"color: {Theme.get('text_main')}; font-size: 10.5pt;")
         
-        # 刷新 Frame 样式 (根据折叠状态)
-        if self.is_expanded:
+        is_collapsing = (not self.is_expanded) and (self.anim.state() == QPropertyAnimation.Running)
+        use_expanded_style = self.is_expanded or is_collapsing
+
+        if use_expanded_style:
             self.header_frame.setStyleSheet(f"""
                 QFrame {{
                     background-color: {Theme.get('bg_card')};
-                    border: 1px solid {self.accent_color};
+                    border: 1px solid {Theme.get('border')};
+                    border-left: 4px solid {self.accent_color};
                     border-bottom: none;
                     border-top-left-radius: 8px;
                     border-top-right-radius: 8px;
@@ -741,25 +876,61 @@ class ResultBlock(QWidget):
                 }}
             """)
             self.content_frame.setStyleSheet(f"""
-                background-color: {Theme.get('input_bg')}; 
-                border: 1px solid {self.accent_color};
-                border-top: none;
-                border-bottom-left-radius: 8px; 
-                border-bottom-right-radius: 8px;
+                QFrame {{
+                    background-color: {Theme.get('input_bg')}; 
+                    border: 1px solid {Theme.get('border')};
+                    border-left: 4px solid {self.accent_color};
+                    border-top: none;
+                    border-bottom-left-radius: 8px; 
+                    border-bottom-right-radius: 8px;
+                }}
             """)
         else:
             self.header_frame.setStyleSheet(f"""
                 QFrame {{
                     background-color: {Theme.get('bg_card')};
                     border: 1px solid {Theme.get('border')};
+                    border-left: 4px solid transparent;
                     border-radius: 8px;
                 }}
                 QFrame:hover {{
-                    border: 1px solid {self.accent_color};
+                    border-left: 4px solid {self.accent_color};
+                    background-color: {QColor(Theme.get('bg_card')).lighter(105).name()};
                 }}
             """)
         
-        self.update() # 触发重绘
+        self.update() 
+
+    def get_target_height(self):
+        """精准计算内部内容所需的高度，坚决不给多余的留白空间"""
+        w = self.width()
+        self.content_frame.setFixedWidth(w)
+        self.content_frame.layout().activate() # 强制布局刷新
+        self.content_frame.adjustSize() # 自适应包裹
+        target_h = self.content_frame.height()
+        
+        # 解除强绑定，恢复缩放响应特性
+        self.content_frame.setMinimumWidth(0)
+        self.content_frame.setMaximumWidth(16777215)
+        return target_h
+
+    def _on_anim_finished(self):
+        if not self.is_expanded:
+            self.anim_wrapper.hide()
+            self.update_style() 
+        else:
+            # 锁定高度，消除 QScrollArea 自带的多余留白
+            target_h = self.get_target_height()
+            self.anim_wrapper.setMinimumHeight(target_h)
+            self.anim_wrapper.setMaximumHeight(target_h)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # 如果窗口在展开状态下被拉伸，自动重新计算并无缝更新紧凑高度
+        if self.is_expanded and self.anim.state() != QPropertyAnimation.Running:
+            target_h = self.get_target_height()
+            self.anim_wrapper.setMinimumHeight(target_h)
+            self.anim_wrapper.setMaximumHeight(target_h)
 
     def mousePressEvent(self, event):
         self.toggle_expand()
@@ -767,20 +938,37 @@ class ResultBlock(QWidget):
         super().mousePressEvent(event)
 
     def toggle_expand(self):
+        if self.anim.state() == QPropertyAnimation.Running:
+            return 
+
         self.is_expanded = not self.is_expanded
         
         if self.is_expanded:
-            self.content_frame.show()
+            self.anim_wrapper.setMinimumHeight(0) # 释放最小约束以供动画运行
+            self.anim_wrapper.setMaximumHeight(0) 
+            self.anim_wrapper.show()
             self.preview_lbl.hide() 
             self.arrow_lbl.setText("▲")
-            # 通知外部：我展开了
+            
+            target_h = self.get_target_height()
+            
+            self.anim.stop()
+            self.anim.setStartValue(0)
+            self.anim.setEndValue(target_h)
+            self.anim.start()
+            
             self.expanded.emit(self.index)
         else:
-            self.content_frame.hide()
             self.preview_lbl.show()
             self.arrow_lbl.setText("▼")
+            
+            self.anim_wrapper.setMinimumHeight(0)
+            
+            self.anim.stop()
+            self.anim.setStartValue(self.anim_wrapper.height())
+            self.anim.setEndValue(0)
+            self.anim.start()
         
-        # 更新样式
         self.update_style()
         self.request_scroll.emit()
 
