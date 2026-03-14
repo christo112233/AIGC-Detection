@@ -72,7 +72,7 @@ class AIGCDetectionThread(QThread):
             return
 
         try:
-            # 在线程内延迟导入体积庞大的 AI 库，加快软件瞬间启动速度
+            # 延迟导入，保证界面秒开
             import torch
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
             import torch.nn.functional as F
@@ -115,18 +115,63 @@ class AIGCDetectionThread(QThread):
                     if any(x in str(label).lower() for x in ['fake', 'ai', 'chatgpt', 'generated', '1', 'label_1']):
                         ai_label_id = int(idx); break
 
-            paragraphs = [p for p in self.text.split("\n") if p.strip()]
+            # =================================================================
+            # 【核心升级：智能长文本防截断切分算法】
+            # =================================================================
+            raw_paragraphs = [p for p in self.text.split("\n") if p.strip()]
+            paragraphs = []
+            
+            for p in raw_paragraphs:
+                # 400 个中文字符通常远不到 512 个 Token，属于安全线
+                if len(p) < 400:
+                    paragraphs.append(p)
+                else:
+                    # 如果段落超长，使用正则寻找所有句子结束符，并在结束符后切分
+                    # (?<=[。.!！?？]) 表示匹配这些标点符号之后的位置，这样切分不会丢失标点
+                    sentences = re.split(r'(?<=[。.!！?？])', p)
+                    current_chunk = ""
+                    
+                    for s in sentences:
+                        # 极端防崩溃：如果一句话本身没有标点且超过了 400 字，强制暴力切断
+                        if len(s) > 400:
+                            if current_chunk: 
+                                paragraphs.append(current_chunk)
+                                current_chunk = ""
+                            # 按 400 字硬切
+                            for i in range(0, len(s), 400):
+                                paragraphs.append(s[i:i+400])
+                                
+                        # 正常拼接：如果加上这句话超过 400 字，把之前的推入列表，重新开始拼接
+                        elif len(current_chunk) + len(s) > 400:
+                            paragraphs.append(current_chunk)
+                            current_chunk = s
+                        else:
+                            current_chunk += s
+                            
+                    # 把最后剩余的尾巴加进去
+                    if current_chunk:
+                        paragraphs.append(current_chunk)
+            # =================================================================
+
             if not paragraphs:
-                self.result_signal.emit({"total_ai_rate": 0, "paragraphs": []}); return
+                self.result_signal.emit({"total_ai_rate": 0, "paragraphs": [], "total_tokens": 0}); return
 
             results = []
             total_weighted_score = 0; total_valid_weight = 0
+            total_tokens = 0 # 用于统计消耗的真实算力
 
             # 逐段推理
             for idx, para in enumerate(paragraphs):
                 self.status_signal.emit(f"深度指纹分析中... {idx+1}/{len(paragraphs)}")
                 try:
+                    # 这里依然保留 max_length=512 和 truncation=True 作为绝对的安全底线
+                    # 但由于上面的算法，它实际上永远不会触发截断丢失文本了
                     inputs = tokenizer(para, return_tensors="pt", truncation=True, max_length=512)
+                    
+                    # 统计当前切分段落产生的真实 Token 数量
+                    token_count = inputs["input_ids"].shape[1]
+                    total_tokens += token_count
+                    
                     inputs = {k: v.to(torch_device) for k, v in inputs.items()}
                     with torch.no_grad():
                         outputs = model(**inputs)
@@ -135,19 +180,13 @@ class AIGCDetectionThread(QThread):
                         probs = F.softmax(scaled_logits, dim=-1)
                         raw_ai_score = probs[0][ai_label_id].item()
                         
-                        # 应用特征扣分和指数惩罚
                         human_bonus = self.calculate_human_features(para)
                         adjusted_score = max(0.0, raw_ai_score - human_bonus)
                         final_ai_score = math.pow(adjusted_score, self.POWER_FACTOR)
                         ai_rate = round(final_ai_score * 100, 2)
                     
-                    # 统计汉字数量 (涵盖绝大多数常用中文字符，每个算 1 个字符)
                     chinese_count = len(re.findall(r'[\u4e00-\u9fa5]', para))
-                    
-                    # 统计英文字母和数字数量 (每个算 0.5 个字符)
                     alnum_count = len(re.findall(r'[a-zA-Z0-9]', para))
-                    
-                    # 计算等效长度 (标点符号和空格被自动忽略)
                     para_len = chinese_count + (alnum_count * 0.5)
                     
                     is_ignored = para_len < self.MIN_VALID_CHARS
@@ -163,7 +202,8 @@ class AIGCDetectionThread(QThread):
                 self.progress_signal.emit(30 + int(((idx + 1) / len(paragraphs)) * 65))
 
             avg = round(total_weighted_score / total_valid_weight, 2) if total_valid_weight > 0 else 0
-            self.result_signal.emit({"total_ai_rate": avg, "paragraphs": results})
+            # 将总体分率和消耗的 Token 一起发送给界面
+            self.result_signal.emit({"total_ai_rate": avg, "paragraphs": results, "total_tokens": total_tokens})
 
         except Exception as e:
             if "upgrade torch" in str(e) and "v2.6" in str(e):
