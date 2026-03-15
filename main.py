@@ -2,40 +2,37 @@ import sys
 import os
 
 # --- 依赖库安全导入 (用于读取文档) ---
-# 使用 try-except 来包装，避免用户环境中未安装这些第三方库时直接崩溃
 try:
-    import chardet # 用于探测 TXT 文件的编码格式
+    import chardet 
     HAS_CHARDET = True
 except ImportError:
     HAS_CHARDET = False
 
 try:
-    import docx # 用于读取 Word (.docx) 格式的文件
+    import docx 
     HAS_DOCX = True
 except ImportError:
     HAS_DOCX = False
 
 try:
-    import fitz # PyMuPDF 用于读取 PDF 格式的文件 (安装命令: pip install PyMuPDF)
+    import fitz 
     HAS_PDF = True
 except ImportError:
     HAS_PDF = False
 
+import html
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QFrame,
-    QFileDialog, QMessageBox, QSplitter, QGraphicsOpacityEffect, QScrollArea, QCheckBox,
-    QPushButton 
+    QFileDialog, QMessageBox, QSplitter, QScrollArea, QCheckBox, QPushButton 
 )
-from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QTimer, QThread
-from PySide6.QtGui import QCursor, QFont
+from PySide6.QtCore import Qt, QTimer, QThread
+from PySide6.QtGui import QCursor, QFont, QColor, QPalette 
 
 # --- 导入分离的模块 ---
-# ui_components.py 中包含了所有自定义的漂亮控件
 from ui_components import (
-    Theme, ThemeSwitch, ThreeDButton, ModernProgressBar, 
+    Theme, ThreeDButton, GlowingButton, ModernProgressBar, 
     AIGCGaugeWidget, AIGCPieChart, HeatmapBar, DragTextEdit, ResultBlock, StatsDashboard, DetailedHeatmapWindow
 )
-# core_engine.py 中包含后台分析逻辑和路径工具
 from core_engine import AIGCDetectionThread, get_resource_path
 
 # ---------------------- 主程序窗口 ----------------------
@@ -44,71 +41,72 @@ class AIGCSentinel(QMainWindow):
         super().__init__()
         self.setWindowTitle("DeepVeri - 智能溯源系统")
         self.resize(1300, 850)
-        self.is_model_valid = False # 记录模型是否存在
+        self.is_model_valid = False 
         self.model_path = ""
-        self.last_results = []      # 用于记录最近一次的推理结果数组
-        self.detailed_heatmap_win = None # 全景热力图窗口实例
+        self.last_results = []      
+        self.detailed_heatmap_win = None 
         
-        # 建立用于平滑主题切换的动画遮罩层 (实现类似截屏渐隐的动画效果)
-        self.transition_overlay = QLabel(self)
-        self.transition_overlay.hide()
-        self.transition_overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True) # 鼠标穿透
-        self.transition_effect = QGraphicsOpacityEffect(self.transition_overlay)
-        self.transition_overlay.setGraphicsEffect(self.transition_effect)
+        # --- 性能优化：更智能的渲染引擎 ---
+        self.render_queue = []
+        self.render_timer = QTimer(self)
+        # 将频率降低至 30ms，给 UI 线程留出足够的“呼吸”间隙处理布局计算
+        self.render_timer.timeout.connect(self._process_render_item)
         
-        self.init_ui()           # 初始化所有 UI 组件
-        self.update_theme()      # 应用初始主题色
-        self.check_model_status()# 检查本地是否有可用模型
+        # 强制锁定为深色模式
+        Theme.CURRENT_MODE = 'dark'
+        
+        self.init_ui()           
+        self.update_theme()      
+        self.check_model_status()
 
     def init_ui(self):
-        # 核心中心 Widget 设置
         central = QWidget()
+        central.setObjectName("centralWidget") 
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         
-        # === 核心优化: 彻底压榨边缘留白，将所有空间交还给内容层 ===
+        # === 核心优化: 彻底压榨边缘留白 ===
         layout.setContentsMargins(20, 20, 20, 15) 
         layout.setSpacing(15) 
-        # =======================================================
 
         # ------------------ 顶部 Header ------------------
         header = QHBoxLayout()
         title_box = QVBoxLayout()
-        # 标题和副标题
         self.title_lbl = QLabel("DeepVeri")
-        self.title_lbl.setStyleSheet("font-size: 24px; font-weight: 900; letter-spacing: 1.5px;") # 缩小字号
+        self.title_lbl.setStyleSheet("font-size: 24px; font-weight: 900; letter-spacing: 1.5px;") 
         self.sub_lbl = QLabel("深度学习文本溯源检测平台")
         self.sub_lbl.setStyleSheet(f"font-size: 11px; font-weight: bold; letter-spacing: 1px; color: #2D79FF;")
         title_box.addWidget(self.title_lbl)
         title_box.addWidget(self.sub_lbl)
         header.addLayout(title_box)
-        header.addStretch() # 占位弹簧，把后面的按钮挤到右边去
         
-        # 黑暗/白天模式切换开关
-        self.theme_switch = ThemeSwitch()
-        self.theme_switch.toggled.connect(self.toggle_theme)
-        header.addWidget(self.theme_switch)
-        header.addSpacing(15)
+        header.addSpacing(40)
         
-        # 导入文档按钮
-        self.btn_import = ThreeDButton("导入文档", is_primary=False, parent=self)
-        self.btn_import.setFixedWidth(100)
+        self.btn_clear = GlowingButton("🗑️  清空内容", variant="danger", parent=self)
+        self.btn_clear.setFixedWidth(105)
+        self.btn_clear.setToolTip("清空当前所有内容与检测结果")
+        self.btn_clear.clicked.connect(self.clear_content)
+        header.addWidget(self.btn_clear)
+        
+        header.addStretch() 
+        
+        self.btn_import = GlowingButton("📂  导入文档", variant="secondary", parent=self)
+        self.btn_import.setFixedWidth(115)
         self.btn_import.clicked.connect(self.import_file)
         
-        # 清空内容按钮
-        self.btn_clear = ThreeDButton("清空", is_primary=False, parent=self)
-        self.btn_clear.setFixedWidth(80)
-        self.btn_clear.clicked.connect(self.clear_content)
+        self.btn_merge = GlowingButton("✂️  合并排版", variant="secondary", parent=self)
+        self.btn_merge.setFixedWidth(115)
+        self.btn_merge.setToolTip("消除换行碎片，强制启用智能动态长文切分算法")
+        self.btn_merge.clicked.connect(self.merge_all_lines)
         
-        # 开始检测按钮
-        self.btn_detect = ThreeDButton("⚡ 开始深度检测", parent=self)
-        self.btn_detect.setFixedWidth(140)
+        self.btn_detect = GlowingButton("⚡  开始深度检测", variant="primary", parent=self)
+        self.btn_detect.setFixedWidth(160)
         self.btn_detect.clicked.connect(self.run_detection)
         
         header.addWidget(self.btn_import)
-        header.addSpacing(10)
-        header.addWidget(self.btn_clear)
-        header.addSpacing(15)
+        header.addSpacing(12)
+        header.addWidget(self.btn_merge)
+        header.addSpacing(12)
         header.addWidget(self.btn_detect)
         layout.addLayout(header)
 
@@ -116,13 +114,11 @@ class AIGCSentinel(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(20)
         
-        # 左侧：输入区
         self.card_input = QFrame()
         in_layout = QVBoxLayout(self.card_input)
         
-        # --- 新增：带字数统计的横向标题栏 ---
         in_header = QHBoxLayout()
-        self.label_input = QLabel("📝 原文输入 (支持 .txt / .docx / .pdf 拖入)")
+        self.label_input = QLabel("📝  原文输入 (支持 .txt / .docx / .pdf 拖入)")
         self.label_input.setStyleSheet("font-weight: bold; margin-bottom: 5px;")
         
         self.lbl_char_count = QLabel("字数: 0")
@@ -134,7 +130,7 @@ class AIGCSentinel(QMainWindow):
         
         self.input_edit = DragTextEdit()
         self.input_edit.file_dropped.connect(self.handle_file_content)
-        self.input_edit.textChanged.connect(self.update_char_count) # 绑定文本实时变化信号
+        self.input_edit.textChanged.connect(self.update_char_count) 
         
         in_layout.addLayout(in_header)
         in_layout.addWidget(self.input_edit)
@@ -148,15 +144,13 @@ class AIGCSentinel(QMainWindow):
         result_main_layout = QVBoxLayout(result_main_widget)
         result_main_layout.setContentsMargins(0,0,0,0)
         
-        # 可视化组合面板
         self.dashboard = StatsDashboard()
         self.gauge = self.dashboard.gauge
         self.pie_chart = self.dashboard.pie_chart
         result_main_layout.addWidget(self.dashboard)
         
-        # 控制栏 (用于勾选只显示高风险段落)
         ctrl_bar = QHBoxLayout()
-        self.label_output = QLabel("🔍 逐段溯源分析")
+        self.label_output = QLabel("🔍  逐段溯源分析")
         self.label_output.setStyleSheet("font-weight: bold; font-size: 14px;")
         self.chk_only_high_risk = QCheckBox("只显示高风险内容 (>60%)")
         self.chk_only_high_risk.setCursor(Qt.PointingHandCursor)
@@ -167,7 +161,6 @@ class AIGCSentinel(QMainWindow):
         ctrl_bar.addSpacing(10)
         result_main_layout.addLayout(ctrl_bar)
         
-        # 结果列表 (可滚动的区域)
         self.result_scroll = QScrollArea()
         self.result_scroll.setWidgetResizable(True)
         self.result_scroll.setFrameShape(QFrame.NoFrame)
@@ -178,50 +171,44 @@ class AIGCSentinel(QMainWindow):
         self.result_scroll.setWidget(self.result_container)
         result_main_layout.addWidget(self.result_scroll)
         
-        # 侧边热力导航条 (根据段落长度和 AI 浓度绘制的微型地图)
         self.heatmap = HeatmapBar()
         self.heatmap.clicked_section.connect(self.scroll_to_section) 
         
-        # --- 核心新增：热力条悬浮提示及双击放大交互 ---
         self.heatmap.setToolTip("💡 双击展开全景热力分析图")
         self.heatmap.double_clicked.connect(self.show_detailed_heatmap)
 
         output_outer_layout.addWidget(result_main_widget)
         output_outer_layout.addWidget(self.heatmap)
 
-        # 将左右面板加入到拖拽器
         splitter.addWidget(self.card_input)
         splitter.addWidget(self.card_output)
-        splitter.setSizes([600, 500]) # 默认比例
+        splitter.setSizes([600, 500]) 
         layout.addWidget(splitter, stretch=1)
 
         # ------------------ 底部状态栏 ------------------
         status_bar = QFrame()
-        # 压缩底部状态栏高度 30 -> 24
         status_bar.setFixedHeight(24)
         sb_layout = QHBoxLayout(status_bar)
         sb_layout.setContentsMargins(0,0,0,0)
         
         self.status_icon = QLabel("●")
         self.status_text = QLabel("初始化...")
-        self.status_text.setStyleSheet("font-size: 11px; font-weight: bold;")
         
-        self.btn_refresh = QPushButton("🔄 刷新状态")
+        self.btn_refresh = QPushButton("🔄  刷新")
         self.btn_refresh.setCursor(Qt.PointingHandCursor)
-        self.btn_refresh.setFixedSize(76, 22) # 更迷你的按钮
+        self.btn_refresh.setFixedSize(70, 20) 
         self.btn_refresh.clicked.connect(self.manual_refresh_model)
         
         sb_layout.addWidget(self.status_icon)
         sb_layout.addWidget(self.status_text)
+        sb_layout.addSpacing(5)
         sb_layout.addWidget(self.btn_refresh)
         sb_layout.addStretch()
         
-        # 硬件加速标识显示区
         self.label_device = QLabel("")
         self.label_device.setStyleSheet("color: #666; font-size: 11px; margin-right: 10px;")
         sb_layout.addWidget(self.label_device)
         
-        # 进度条
         self.progress_bar = ModernProgressBar()
         self.progress_bar.setFixedWidth(300)
         sb_layout.addWidget(self.progress_bar)
@@ -229,153 +216,170 @@ class AIGCSentinel(QMainWindow):
 
     # ------------------ 模型调度与交互 ------------------
     def manual_refresh_model(self):
-        """手动点击刷新模型按钮的逻辑"""
+        self.btn_refresh.setEnabled(False) 
+        bg_color = Theme.COLORS['dark']['bg_main']
+        self.status_text.setText(" ")
+        self.status_text.setStyleSheet(f"background-color: {bg_color};")
+        self.status_text.repaint()
+        QApplication.processEvents() 
+        
         self.status_text.setText("正在扫描本地模型...")
-        self.status_text.setStyleSheet("color: #FFD60A; font-weight: bold;")
-        QApplication.processEvents() # 强制刷新 UI 让文字先变过去
-        QThread.msleep(300) # 假装读了 300 毫秒营造仪式感
+        self.status_text.setStyleSheet(f"color: {Theme.ACCENT_YELLOW.name()}; background-color: {bg_color}; font-weight: bold; font-family: 'Microsoft YaHei'; padding: 0 4px;")
+        self.status_text.repaint()
+        QApplication.processEvents() 
+        QThread.msleep(300) 
         self.check_model_status()
         if self.is_model_valid: QMessageBox.information(self, "状态更新", "成功检测到本地模型！")
         else: QMessageBox.warning(self, "状态更新", "仍然未检测到完整模型。")
+        self.btn_refresh.setEnabled(True)
 
     def check_model_status(self):
-        """验证模型目录是否完整包含了推理所需的必要文件"""
         target_dir = get_resource_path("AIGC_Model")
         if not os.path.exists(target_dir): self.set_model_invalid("未找到 'AIGC_Model' 文件夹"); return
         try:
             files = os.listdir(target_dir)
             has_config = "config.json" in files
-            # 兼容 bin 权重和 safetensors 权重两种格式
             has_bin = "pytorch_model.bin" in files or "model.safetensors" in files
+            bg_color = Theme.COLORS['dark']['bg_main']
             if has_config and has_bin:
                 self.is_model_valid = True; self.model_path = target_dir
-                self.status_icon.setStyleSheet(f"color: #00E070; font-size: 14px;")
+                self.status_icon.setStyleSheet(f"color: {Theme.ACCENT_GREEN.name()}; font-size: 14px;")
                 self.status_text.setText("本地引擎已加载")
-                self.status_text.setStyleSheet("color: #30D158; font-weight: bold;")
+                self.status_text.setStyleSheet(f"color: {Theme.ACCENT_GREEN.name()}; background-color: {bg_color}; font-weight: bold; font-family: 'Microsoft YaHei'; padding: 0 4px;")
             else: self.set_model_invalid(f"缺失核心文件")
         except Exception as e: self.set_model_invalid(f"读取失败: {str(e)}")
 
     def set_model_invalid(self, reason):
-        """更新 UI 为模型不可用状态"""
         self.is_model_valid = False
         self.model_path = ""
-        self.status_icon.setStyleSheet(f"color: #FF453A; font-size: 14px;")
+        bg_color = Theme.COLORS['dark']['bg_main']
+        self.status_icon.setStyleSheet(f"color: {Theme.ACCENT_RED.name()}; font-size: 14px;")
         self.status_text.setText(f"⚠️ 无法检测: {reason}")
-        self.status_text.setStyleSheet("color: #FF453A; font-weight: bold;")
+        self.status_text.setStyleSheet(f"color: {Theme.ACCENT_RED.name()}; background-color: {bg_color}; font-weight: bold; font-family: 'Microsoft YaHei'; padding: 0 4px;")
 
     def update_device_ui(self, msg, is_gpu):
-        """核心推理线程发来设备类型后，在此处更新状态栏的硬件信息"""
         self.label_device.setText(msg)
-        color = "#00E070" if is_gpu else "#FFD60A"
+        color = Theme.ACCENT_GREEN.name() if is_gpu else Theme.ACCENT_YELLOW.name()
         self.label_device.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 11px; margin-right: 15px;")
 
-    # ------------------ 弹出全景热力图功能 ------------------
     def show_detailed_heatmap(self):
-        """当用户双击极细热力条时被触发，打开包含筛选项和整齐列表的次级视窗"""
         if not hasattr(self, 'last_results') or not self.last_results:
             return
-            
-        # 如果弹窗已经打开，将其激活置顶即可
         if hasattr(self, 'detailed_heatmap_win') and self.detailed_heatmap_win and self.detailed_heatmap_win.isVisible():
             self.detailed_heatmap_win.activateWindow()
         else:
-            # 否则生成全新的过滤视图窗口
             self.detailed_heatmap_win = DetailedHeatmapWindow(self.last_results, self)
-            # 点击新弹窗里的独立卡片时，依然让主界面发生联动滚动！这极其方便定位
             self.detailed_heatmap_win.request_scroll.connect(self.scroll_to_section)
             self.detailed_heatmap_win.show()
 
     # ------------------ 主题与界面渲染 ------------------
-    def toggle_theme(self, is_dark):
-        """白天/黑夜主题切换动画"""
-        # 第一步：把当前界面的样子截图，盖在最上面
-        pixmap = self.grab()
-        self.transition_overlay.setPixmap(pixmap)
-        self.transition_overlay.setGeometry(0, 0, self.width(), self.height())
-        self.transition_overlay.show()
-        self.transition_effect.setOpacity(1.0)
-        
-        # 第二步：底层其实瞬间切换到了新主题
-        Theme.toggle()
-        self.update_theme()
-        
-        # 强制更新所有自定义绘制组件的颜色
-        self.dashboard.update_style()
-        self.btn_import.update()
-        self.btn_clear.update()
-        self.btn_detect.update()
-        self.progress_bar.update()
-        self.input_edit.update()
-        
-        for i in range(self.result_layout.count()):
-            item = self.result_layout.itemAt(i)
-            if item.widget() and isinstance(item.widget(), ResultBlock):
-                item.widget().update_style()
-                
-        if hasattr(self, 'heatmap'): self.heatmap.update() 
-        
-        # 同步可能正在显示的全景分析弹窗主题
-        if hasattr(self, 'detailed_heatmap_win') and self.detailed_heatmap_win and self.detailed_heatmap_win.isVisible():
-            self.detailed_heatmap_win.update_theme()
-        
-        btn_bg = "#333" if is_dark else "#DDD"
-        btn_txt = "#FFF" if is_dark else "#333"
-        self.btn_refresh.setStyleSheet(f"QPushButton {{ background: {btn_bg}; color: {btn_txt}; border-radius: 4px; border: none; font-size: 11px; }} QPushButton:hover {{ background: #2D79FF; color: white; }}")
-        
-        if not self.is_model_valid: self.status_text.setStyleSheet("color: #FF453A; font-weight: bold;")
-        else: self.status_text.setStyleSheet("color: #30D158; font-weight: bold;")
-        
-        # 第三步：把盖在最上面的旧主题截图透明度慢慢变0，实现平滑渐变
-        self.anim_fade = QPropertyAnimation(self.transition_effect, b"opacity")
-        self.anim_fade.setDuration(350)
-        self.anim_fade.setStartValue(1.0)
-        self.anim_fade.setEndValue(0.0)
-        self.anim_fade.setEasingCurve(QEasingCurve.InOutQuad)
-        self.anim_fade.finished.connect(self.transition_overlay.hide)
-        self.anim_fade.start()
-
     def update_theme(self):
-        """读取当前的 Theme 并应用到全体标准控件"""
-        t = Theme.COLORS[Theme.CURRENT_MODE]
+        t = Theme.COLORS['dark']
+        
+        palette = QApplication.palette()
+        palette.setColor(QPalette.Window, QColor(t['bg_main']))
+        palette.setColor(QPalette.WindowText, QColor(t['text_main']))
+        palette.setColor(QPalette.Base, QColor(t['input_bg']))
+        palette.setColor(QPalette.AlternateBase, QColor(t['bg_card']))
+        palette.setColor(QPalette.ToolTipBase, QColor(t['bg_card']))
+        palette.setColor(QPalette.ToolTipText, QColor(t['text_main']))
+        palette.setColor(QPalette.Text, QColor(t['text_main']))
+        palette.setColor(QPalette.Button, QColor(t['bg_card']))
+        palette.setColor(QPalette.ButtonText, QColor(t['text_main']))
+        palette.setColor(QPalette.BrightText, QColor("white"))
+        palette.setColor(QPalette.Highlight, Theme.ACCENT_BLUE)
+        palette.setColor(QPalette.HighlightedText, QColor("white"))
+        QApplication.setPalette(palette)
+        
+        scrollbar_css = """
+            QScrollBar:vertical { border: none; background: transparent; width: 8px; margin: 0px; }
+            QScrollBar::handle:vertical { background: rgba(255, 255, 255, 0.15); border-radius: 4px; min-height: 30px; }
+            QScrollBar::handle:vertical:hover { background: rgba(255, 255, 255, 0.3); }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: none; border: none; }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+            
+            QScrollBar:horizontal { border: none; background: transparent; height: 8px; margin: 0px; }
+            QScrollBar::handle:horizontal { background: rgba(255, 255, 255, 0.15); border-radius: 4px; min-width: 30px; }
+            QScrollBar::handle:horizontal:hover { background: rgba(255, 255, 255, 0.3); }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: none; border: none; }
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
+        """
+        
         self.setStyleSheet(f"""
-            QMainWindow {{ background-color: {t['bg_main']}; }}
-            QWidget {{ color: {t['text_main']}; font-family: 'Segoe UI', 'Microsoft YaHei'; }}
-            QTextEdit {{ background-color: {t['input_bg']}; color: {t['text_main']}; border: 1px solid {t['border']}; border-radius: 12px; padding: 15px; font-size: 11pt; }}
-            QTextEdit:focus {{ border: 1px solid #2D79FF; }}
+            QMainWindow, #centralWidget {{ background-color: {t['bg_main']}; }}
             QSplitter::handle {{ background: transparent; }}
             QScrollArea {{ background: transparent; border: none; }}
             QScrollArea > QWidget > QWidget {{ background: transparent; }}
-            QCheckBox {{ spacing: 5px; color: {t['text_sub']}; }}
-            QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {t['border']}; }}
-            QCheckBox::indicator:checked {{ background-color: #2D79FF; border-color: #2D79FF; image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwb2x5bGluZSBwb2ludHM9IjIwIDYgOSAxNyA0IDEyIi8+PC9zdmc+); }}
+            QCheckBox {{ color: {t['text_sub']}; font-family: 'Segoe UI', 'Microsoft YaHei'; }}
+            QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 6px; border: 1px solid {t['border']}; }}
+            QCheckBox::indicator:checked {{ background-color: #3B82F6; border-color: #3B82F6; image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwb2x5bGluZSBwb2ludHM9IjIwIDYgOSAxNyA0IDEyIi8+PC9zdmc+); }}
+            {scrollbar_css}
         """)
-        self.title_lbl.setStyleSheet(f"font-size: 24px; font-weight: 900; color: {t['text_main']};")
-        self.label_input.setStyleSheet(f"color: {t['text_sub']}; font-weight: bold; margin-bottom: 5px;")
-        self.lbl_char_count.setStyleSheet(f"color: {t['text_sub']}; font-size: 11px; margin-bottom: 5px;") # 应用字数标签的主题色
+        
+        self.input_edit.setStyleSheet(f"""
+            QTextEdit {{ 
+                background-color: {t['input_bg']}; 
+                color: {t['text_main']}; 
+                border: 1px solid rgba(255, 255, 255, 0.04); 
+                border-radius: 16px; 
+                padding: 24px 22px; 
+                font-size: 11.5pt; 
+                font-family: 'Segoe UI', 'Microsoft YaHei';
+                selection-background-color: #3B82F6;
+                selection-color: white;
+            }}
+            QTextEdit:focus {{ 
+                border: 1px solid rgba(59, 130, 246, 0.5); 
+                background-color: {QColor(t['input_bg']).lighter(102).name()};
+            }}
+        """)
+        
+        self.title_lbl.setStyleSheet(f"font-size: 24px; font-weight: 900; color: {t['text_main']}; font-family: 'Segoe UI', 'Microsoft YaHei';")
+        self.label_input.setStyleSheet(f"color: {t['text_sub']}; font-weight: bold; margin-bottom: 5px; font-family: 'Segoe UI', 'Microsoft YaHei';")
+        self.lbl_char_count.setStyleSheet(f"color: {t['text_sub']}; font-size: 11px; margin-bottom: 5px; font-family: 'Segoe UI', 'Microsoft YaHei';") 
+        self.label_output.setStyleSheet(f"color: {t['text_sub']}; font-weight: bold; font-size: 14px; font-family: 'Segoe UI', 'Microsoft YaHei';")
         
         card_style = f"QFrame {{ background-color: {t['bg_card']}; border: 1px solid {t['border']}; border-radius: 16px; }}"
         self.card_input.setStyleSheet(card_style)
         self.card_output.setStyleSheet(card_style)
-        self.card_input.setGraphicsEffect(Theme.shadow(30))
-        self.card_output.setGraphicsEffect(Theme.shadow(30))
+        self.card_input.setGraphicsEffect(Theme.shadow(35))
+        self.card_output.setGraphicsEffect(Theme.shadow(35))
         
         if hasattr(self, 'dashboard'):
             self.dashboard.update_style()
-            
-        btn_bg = "#333" if Theme.CURRENT_MODE == 'dark' else "#DDD"
-        btn_txt = "#FFF" if Theme.CURRENT_MODE == 'dark' else "#333"
-        self.btn_refresh.setStyleSheet(f"QPushButton {{ background: {btn_bg}; color: {btn_txt}; border-radius: 4px; border: none; font-size: 11px; }} QPushButton:hover {{ background: #2D79FF; color: white; }}")
-
-    def resizeEvent(self, event):
-        # 保证在拉伸窗口时，主题切换的动画遮罩也跟着改变大小
-        if hasattr(self, 'transition_overlay') and self.transition_overlay.isVisible(): 
-            self.transition_overlay.setGeometry(0, 0, self.width(), self.height())
-        super().resizeEvent(event)
+        
+        btn_refresh_bg = "rgba(255, 255, 255, 0.05)"
+        btn_refresh_txt = "#9CA3AF"
+        self.btn_refresh.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {btn_refresh_bg};
+                color: {btn_refresh_txt};
+                border-radius: 10px;
+                border: 1px solid rgba(255, 255, 255, 0.05);
+                font-size: 11px;
+                font-weight: bold;
+                font-family: 'Microsoft YaHei';
+                padding: 0 12px;
+            }}
+            QPushButton:hover {{
+                background-color: #3B82F6;
+                color: white;
+                border: 1px solid #3B82F6;
+            }}
+            QPushButton:pressed {{
+                background-color: #2563EB;
+            }}
+        """)
+        
+        bg = Theme.COLORS['dark']['bg_main']
+        if not self.is_model_valid: self.status_text.setStyleSheet(f"color: {Theme.ACCENT_RED.name()}; background-color: {bg}; font-weight: bold; font-family: 'Microsoft YaHei'; padding: 0 4px;")
+        else: self.status_text.setStyleSheet(f"color: {Theme.ACCENT_GREEN.name()}; background-color: {bg}; font-weight: bold; font-family: 'Microsoft YaHei'; padding: 0 4px;")
 
     def clear_content(self):
-        """重置所有输入输出和统计状态"""
+        self.render_timer.stop() 
+        self.render_queue = []
         self.input_edit.clear()
-        self.lbl_char_count.setText("字数: 0") # 清空时归零
+        self.lbl_char_count.setText("字数: 0") 
         self.last_results = []
         while self.result_layout.count():
             item = self.result_layout.takeAt(0)
@@ -384,26 +388,38 @@ class AIGCSentinel(QMainWindow):
         self.progress_bar.setValue(0)
         self.heatmap.set_data([])
         self.pie_chart.set_data([0, 0, 0])
-        self.dashboard.token_counter.set_data(0)  # <--- 新增：清空时重置 Token
+        self.dashboard.token_counter.set_data(0)  
         
         if hasattr(self, 'detailed_heatmap_win') and self.detailed_heatmap_win:
-            self.detailed_heatmap_win.close() # 联通清除打开的全景图
+            self.detailed_heatmap_win.close() 
+
+    def merge_all_lines(self):
+        text = self.input_edit.toPlainText()
+        if not text.strip(): return
+        
+        import re
+        text = re.sub(r'([\u4e00-\u9fa5])\s*\n\s*([\u4e00-\u9fa5])', r'\1\2', text)
+        text = text.replace('\n', ' ')
+        
+        html_content = f"<div style='line-height: 1.6;'>{html.escape(text).replace(chr(10), '<br>')}</div>"
+        self.input_edit.setHtml(html_content)
+        
+        self.status_text.setText("✅ 已合并排版结构，长文将自动切片计算")
 
     # ------------------ 业务逻辑与算法交互 ------------------
     def run_detection(self):
-        """点击开始检测按钮触发的核心动作"""
         if not self.is_model_valid: QMessageBox.critical(self, "无法运行", f"未检测到完整模型。"); return
         text = self.input_edit.toPlainText().strip()
         if not text: 
             self.btn_detect.setText("⚠️ 内容为空")
-            QTimer.singleShot(1500, lambda: self.btn_detect.setText("⚡ 开始深度检测")) # 1.5秒后恢复文字
+            QTimer.singleShot(1500, lambda: self.btn_detect.setText("⚡  开始深度检测")) 
             return
             
-        # 防止重复点击
         self.btn_detect.setEnabled(False)
         self.btn_detect.setText("正在分析...")
         
-        # 清空上一次的分析结果
+        self.render_timer.stop()
+        self.render_queue = []
         while self.result_layout.count():
             item = self.result_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -411,38 +427,25 @@ class AIGCSentinel(QMainWindow):
         self.gauge.setValue(0)
         self.progress_bar.setValue(0)
         
-        # 启动工作线程去算，主界面保持流畅不卡
         self.thread = AIGCDetectionThread(text, self.model_path)
         self.thread.status_signal.connect(lambda s: self.status_text.setText(s))
         self.thread.progress_signal.connect(self.progress_bar.setValue)
         self.thread.result_signal.connect(self.process_results)
         self.thread.device_signal.connect(self.update_device_ui)
-        self.thread.finished.connect(lambda: [self.btn_detect.setEnabled(True), self.btn_detect.setText("⚡ 开始深度检测"), self.status_text.setText("分析完成") if self.is_model_valid else None, self.progress_bar.setValue(100)])
+        self.thread.finished.connect(lambda: [self.btn_detect.setEnabled(True), self.btn_detect.setText("⚡  开始深度检测"), self.status_text.setText("分析完成") if self.is_model_valid else None, self.progress_bar.setValue(100)])
         self.thread.start()
 
     def process_results(self, res):
-        """接收并处理后台线程发来的分析结果字典"""
         if "error" in res: QMessageBox.critical(self, "检测中断", res["error"]); return
         
-        # 存放本次完整数据供应全景图使用
         self.last_results = res.get("paragraphs", [])
         
-        # 如果旧的全景图开着，无缝刷新它
-        if hasattr(self, 'detailed_heatmap_win') and self.detailed_heatmap_win and self.detailed_heatmap_win.isVisible():
-            self.detailed_heatmap_win.close()
-            self.show_detailed_heatmap() 
-        
-        # 1. 更新仪表盘
+        # 1. 第一阶段渲染：立即更新顶层非密集型视觉元素（让用户先看到“重点”）
         self.gauge.setValue(res["total_ai_rate"])
-        
-        # 驱动中间的 Token 数字滚动动画
         self.dashboard.token_counter.set_data(res.get("total_tokens", 0))
-        
-        # 2. 更新热力图
         self.heatmap.set_data(self.last_results) 
         
-        # 3. 统计并更新饼图
-        counts = [0, 0, 0] # Human, Mixed, AI
+        counts = [0, 0, 0] 
         for p in self.last_results:
             if p.get("is_ignored"): continue
             rate = p["ai_rate"]
@@ -451,19 +454,41 @@ class AIGCSentinel(QMainWindow):
             else: counts[2] += 1
         self.pie_chart.set_data(counts)
 
-        # 4. 生成每一段的结果卡片块
-        for i, p in enumerate(self.last_results):
-            block = ResultBlock(i, p["content"], p["ai_rate"], is_ignored=p.get("is_ignored", False))
-            block.request_scroll.connect(self.handle_block_resize) # 卡片伸缩时通知外层调整
-            block.request_highlight.connect(self.highlight_source_text) # 点击卡片联动左侧文本高亮
-            block.expanded.connect(self.on_block_expanded) # 实现手风琴效果
-            self.result_layout.addWidget(block)
-            
-        self.result_layout.addStretch() # 把所有卡片往上顶
-        self.apply_filter()
+        # 2. 第二阶段渲染：将密集型段落卡片任务推入队列，并给予 200ms 的视觉稳定延迟
+        self.render_queue = list(enumerate(self.last_results))
+        QTimer.singleShot(200, lambda: self.render_timer.start(30)) 
+        
+        if hasattr(self, 'detailed_heatmap_win') and self.detailed_heatmap_win and self.detailed_heatmap_win.isVisible():
+            self.detailed_heatmap_win.close()
+            self.show_detailed_heatmap() 
+
+    def _process_render_item(self):
+        """核心修复：降低单次主线程负担，配合 UpdatesEnabled 抑制频繁重绘引起的掉帧"""
+        if not self.render_queue:
+            self.render_timer.stop()
+            self.result_layout.addStretch() 
+            self.apply_filter() 
+            return
+
+        # 暂时关闭容器更新，防止 layout 每添加一个 widget 就全屏重绘
+        self.result_container.setUpdatesEnabled(False)
+        
+        # 每一帧处理 1 段，确保 CPU 有足够的时间去渲染之前的阴影和透明度动画
+        idx, p = self.render_queue.pop(0)
+        block = ResultBlock(idx, p["content"], p["ai_rate"], is_ignored=p.get("is_ignored", False))
+        block.request_scroll.connect(self.handle_block_resize) 
+        block.request_highlight.connect(self.highlight_source_text) 
+        block.expanded.connect(self.on_block_expanded) 
+        self.result_layout.addWidget(block)
+        
+        if self.chk_only_high_risk.isChecked() and p["ai_rate"] <= 60:
+            block.hide()
+
+        # 重新启用更新
+        self.result_container.setUpdatesEnabled(True)
+        self.result_container.update()
 
     def on_block_expanded(self, expanded_index):
-        """手风琴效果：只允许同时展开一个段落详情"""
         for i in range(self.result_layout.count()):
             item = self.result_layout.itemAt(i)
             widget = item.widget()
@@ -472,11 +497,9 @@ class AIGCSentinel(QMainWindow):
                     widget.set_expanded(False)
 
     def highlight_source_text(self, content):
-        """通知左侧原文输入框去高亮对应的文字内容"""
         self.input_edit.highlight_paragraph(content)
 
     def apply_filter(self):
-        """勾选/取消勾选'仅看高风险'时候的过滤逻辑"""
         show_only_high = self.chk_only_high_risk.isChecked()
         for i in range(self.result_layout.count()):
             item = self.result_layout.itemAt(i)
@@ -489,30 +512,31 @@ class AIGCSentinel(QMainWindow):
                     widget.show()
 
     def handle_block_resize(self):
-        """当一个段落卡片展开/收缩时，重新调整包裹它的容器大小，避免滚动条异常"""
         self.result_container.adjustSize()
 
     def scroll_to_section(self, index):
-        """点击最右侧热力条时，让中间列表自动滚动定位到对应的段落卡片"""
-        if index < self.result_layout.count():
-            widget = self.result_layout.itemAt(index).widget()
-            if widget:
-                # 如果当前是被过滤掉的隐藏块，强制取消过滤
-                if widget.isHidden():
-                    self.chk_only_high_risk.setChecked(False) 
-                    QApplication.processEvents() 
-                self.result_scroll.ensureWidgetVisible(widget) # 滚动过去
-                widget.toggle_expand() # 顺便把它展开
-                self.highlight_source_text(widget.content) # 左侧原文也跳转过去
+        target_widget = None
+        for i in range(self.result_layout.count()):
+            widget = self.result_layout.itemAt(i).widget()
+            if widget and isinstance(widget, ResultBlock) and widget.index == index:
+                target_widget = widget
+                break
+        
+        if target_widget:
+            if target_widget.isHidden():
+                self.chk_only_high_risk.setChecked(False) 
+                QApplication.processEvents() 
+            self.result_scroll.ensureWidgetVisible(target_widget) 
+            if not target_widget.is_expanded:
+                target_widget.toggle_expand() 
+            self.highlight_source_text(target_widget.content) 
 
     def handle_file_content(self, path):
-        """读取 txt, docx 或 pdf 文件的具体内容到文本框"""
-        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor)) # 变漏斗鼠标
+        QApplication.setOverrideCursor(QCursor(Qt.WaitCursor)) 
         try:
             ext = os.path.splitext(path)[1].lower(); content = ""
             if ext == '.txt':
                 with open(path, 'rb') as f: raw = f.read()
-                # 使用 chardet 智能推测 txt 的文本编码（防止乱码）
                 encoding = chardet.detect(raw)['encoding'] if HAS_CHARDET and chardet.detect(raw)['confidence'] > 0.6 else 'utf-8'
                 try: content = raw.decode(encoding)
                 except: content = raw.decode('utf-8', errors='ignore')
@@ -520,10 +544,8 @@ class AIGCSentinel(QMainWindow):
                 if not HAS_DOCX: QMessageBox.warning(self, "组件缺失", "请安装 python-docx"); return
                 try:
                     doc = docx.Document(path); text_parts = []
-                    # 1. 抽取段落文字
                     for para in doc.paragraphs:
                         if para.text.strip(): text_parts.append(para.text)
-                    # 2. 抽取表格文字 (并做了单元格去重防止合并单元格重复读取)
                     for table in doc.tables:
                         for row in table.rows:
                             unique_cells = []
@@ -543,44 +565,39 @@ class AIGCSentinel(QMainWindow):
             elif ext == '.pdf':
                 if not HAS_PDF: QMessageBox.warning(self, "组件缺失", "请安装 PyMuPDF 库以支持 PDF 读取:\npip install PyMuPDF"); return
                 try:
-                    import re  # 引入正则库用于清洗文本
+                    import re 
                     doc = fitz.open(path); text_parts = []
                     for page in doc:
-                        # 使用 blocks 模式，提取按物理位置聚拢的文本块（段落块）
                         blocks = page.get_text("blocks")
                         for b in blocks:
-                            if b[6] == 0:  # b[6] 为 0 代表这是文本类型，排除图片等其他元素
+                            if b[6] == 0:  
                                 text = b[4].strip()
                                 if text:
-                                    # 核心清洗 1：如果换行符前后都是中文字符，则直接抹除换行，实现中文断行无缝拼接
                                     text = re.sub(r'([\u4e00-\u9fa5])\s*\n\s*([\u4e00-\u9fa5])', r'\1\2', text)
-                                    # 核心清洗 2：将剩余的其他换行符（如英文单词换行、标点符号换行）替换为空格
                                     text = text.replace('\n', ' ')
                                     text_parts.append(text)
                     content = "\n".join(text_parts)
                 except Exception as pdf_err: QMessageBox.warning(self, "解析警告", f"PDF 解析异常: {str(pdf_err)}"); content = ""
-
-            self.input_edit.setPlainText(content); self.status_text.setText(f"已加载: {os.path.basename(path)}")
+            
+            html_content = f"<div style='line-height: 1.6;'>{html.escape(content).replace(chr(10), '<br>')}</div>"
+            self.input_edit.setHtml(html_content)
+            self.status_text.setText(f"已加载: {os.path.basename(path)}")
+            
         except Exception as e: QMessageBox.critical(self, "错误", f"读取失败: {str(e)}")
-        finally: QApplication.restoreOverrideCursor() # 恢复正常鼠标指针
+        finally: QApplication.restoreOverrideCursor() 
 
     def import_file(self):
-        """点击导入文档按钮触发文件选择对话框"""
         path, _ = QFileDialog.getOpenFileName(self, "打开文档", "", "支持的文件 (*.txt *.docx *.pdf)")
         if path: self.handle_file_content(path)
 
     def update_char_count(self):
-        """槽函数：实时更新左侧文本框的字数统计"""
         text = self.input_edit.toPlainText()
-        # 使用千分位格式化显示 (如 1,234)
         self.lbl_char_count.setText(f"字数: {len(text):,}")
 
 if __name__ == "__main__":
-    # 防止高分屏下 UI 缩放乱套
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    # 全局字体设置，开启抗锯齿
     font = QFont("Microsoft YaHei", 10)
     font.setStyleStrategy(QFont.PreferAntialias)
     app.setFont(font)

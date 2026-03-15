@@ -49,8 +49,102 @@ class AIGCDetectionThread(QThread):
         self.text = text
         self.model_path = model_path
         self.MIN_VALID_CHARS = 20
-        self.TEMPERATURE = 2.0
-        self.POWER_FACTOR = 3.5
+        self.TEMPERATURE = 1.5
+        self.POWER_FACTOR = 2.0
+
+    def get_token_length(self, text):
+        """
+        【新增算法】计算等效 Token 长度：
+        所有 ASCII 字符（含英文字母、数字、半角标点和空格）算 0.5 个单位，
+        汉字及全角标点/符号算 1 个单位。
+        """
+        ascii_count = sum(1 for char in text if char.isascii())
+        return len(text) - (ascii_count * 0.5)
+
+    def _smart_split_paragraph(self, text, max_len=700):
+        """
+        【四级智能平滑切分算法】
+        优先按句末切 -> 不行按逗号分号切 -> 不行按空格切 -> 迫不得已才硬切。
+        绝对防止在单词中间或者一句话中间随意切断！
+        """
+        if self.get_token_length(text) <= max_len:
+            return [text]
+            
+        result = []
+        # 1. 第一级：按强标点（句末）切分，保留标点
+        sentences = re.split(r'(?<=[。.!！?？])', text)
+        current_chunk = ""
+        current_len = 0
+        
+        for s in sentences:
+            s_len = self.get_token_length(s)
+            if current_len + s_len <= max_len:
+                current_chunk += s
+                current_len += s_len
+            else:
+                if current_chunk:
+                    result.append(current_chunk)
+                    current_chunk = ""
+                    current_len = 0
+                
+                if s_len > max_len:
+                    # 2. 第二级：单句超长，降级按弱标点（逗号/分号）切分
+                    sub_sentences = re.split(r'(?<=[,，;；])', s)
+                    for sub_s in sub_sentences:
+                        sub_s_len = self.get_token_length(sub_s)
+                        if current_len + sub_s_len <= max_len:
+                            current_chunk += sub_s
+                            current_len += sub_s_len
+                        else:
+                            if current_chunk:
+                                result.append(current_chunk)
+                                current_chunk = ""
+                                current_len = 0
+                                
+                            if sub_s_len > max_len:
+                                # 3. 第三级：弱标点之间仍超长，按空格切分（保护英文单词不被劈开）
+                                words = re.split(r'(?<=\s)', sub_s)
+                                for w in words:
+                                    w_len = self.get_token_length(w)
+                                    if current_len + w_len <= max_len:
+                                        current_chunk += w
+                                        current_len += w_len
+                                    else:
+                                        if current_chunk:
+                                            result.append(current_chunk)
+                                            current_chunk = ""
+                                            current_len = 0
+                                            
+                                        if w_len > max_len:
+                                            # 4. 第四级：终极兜底（无空格连续乱码），只能按字符硬切
+                                            temp_s = ""
+                                            temp_len = 0
+                                            for char in w:
+                                                char_len = 0.5 if char.isascii() else 1.0
+                                                if temp_len + char_len > max_len:
+                                                    result.append(temp_s)
+                                                    temp_s = char
+                                                    temp_len = char_len
+                                                else:
+                                                    temp_s += char
+                                                    temp_len += char_len
+                                            if temp_s:
+                                                current_chunk = temp_s
+                                                current_len = temp_len
+                                        else:
+                                            current_chunk = w
+                                            current_len = w_len
+                            else:
+                                current_chunk = sub_s
+                                current_len = sub_s_len
+                else:
+                    current_chunk = s
+                    current_len = s_len
+                    
+        if current_chunk:
+            result.append(current_chunk)
+            
+        return result
 
     def calculate_human_features(self, text):
         """计算人类写作特征（句长方差/突发性）来降低误判"""
@@ -72,7 +166,7 @@ class AIGCDetectionThread(QThread):
             return
 
         try:
-            # 延迟导入，保证界面秒开
+            # 在线程内延迟导入体积庞大的 AI 库，加快软件瞬间启动速度
             import torch
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
             import torch.nn.functional as F
@@ -116,41 +210,14 @@ class AIGCDetectionThread(QThread):
                         ai_label_id = int(idx); break
 
             # =================================================================
-            # 【核心升级：智能长文本防截断切分算法】
+            # 【核心升级：调用四级降级智能平滑切分算法】
             # =================================================================
             raw_paragraphs = [p for p in self.text.split("\n") if p.strip()]
             paragraphs = []
             
             for p in raw_paragraphs:
-                # 400 个中文字符通常远不到 512 个 Token，属于安全线
-                if len(p) < 400:
-                    paragraphs.append(p)
-                else:
-                    # 如果段落超长，使用正则寻找所有句子结束符，并在结束符后切分
-                    # (?<=[。.!！?？]) 表示匹配这些标点符号之后的位置，这样切分不会丢失标点
-                    sentences = re.split(r'(?<=[。.!！?？])', p)
-                    current_chunk = ""
-                    
-                    for s in sentences:
-                        # 极端防崩溃：如果一句话本身没有标点且超过了 400 字，强制暴力切断
-                        if len(s) > 400:
-                            if current_chunk: 
-                                paragraphs.append(current_chunk)
-                                current_chunk = ""
-                            # 按 400 字硬切
-                            for i in range(0, len(s), 400):
-                                paragraphs.append(s[i:i+400])
-                                
-                        # 正常拼接：如果加上这句话超过 400 字，把之前的推入列表，重新开始拼接
-                        elif len(current_chunk) + len(s) > 400:
-                            paragraphs.append(current_chunk)
-                            current_chunk = s
-                        else:
-                            current_chunk += s
-                            
-                    # 把最后剩余的尾巴加进去
-                    if current_chunk:
-                        paragraphs.append(current_chunk)
+                # 优雅地将复杂的嵌套切分逻辑封装在了外部方法中
+                paragraphs.extend(self._smart_split_paragraph(p, max_len=700))
             # =================================================================
 
             if not paragraphs:
@@ -158,17 +225,14 @@ class AIGCDetectionThread(QThread):
 
             results = []
             total_weighted_score = 0; total_valid_weight = 0
-            total_tokens = 0 # 用于统计消耗的真实算力
+            total_tokens = 0 # 统计消耗的真实算力
 
             # 逐段推理
             for idx, para in enumerate(paragraphs):
                 self.status_signal.emit(f"深度指纹分析中... {idx+1}/{len(paragraphs)}")
                 try:
-                    # 这里依然保留 max_length=512 和 truncation=True 作为绝对的安全底线
-                    # 但由于上面的算法，它实际上永远不会触发截断丢失文本了
                     inputs = tokenizer(para, return_tensors="pt", truncation=True, max_length=512)
                     
-                    # 统计当前切分段落产生的真实 Token 数量
                     token_count = inputs["input_ids"].shape[1]
                     total_tokens += token_count
                     
@@ -180,14 +244,14 @@ class AIGCDetectionThread(QThread):
                         probs = F.softmax(scaled_logits, dim=-1)
                         raw_ai_score = probs[0][ai_label_id].item()
                         
+                        # 应用特征扣分和指数惩罚
                         human_bonus = self.calculate_human_features(para)
                         adjusted_score = max(0.0, raw_ai_score - human_bonus)
                         final_ai_score = math.pow(adjusted_score, self.POWER_FACTOR)
                         ai_rate = round(final_ai_score * 100, 2)
                     
-                    chinese_count = len(re.findall(r'[\u4e00-\u9fa5]', para))
-                    alnum_count = len(re.findall(r'[a-zA-Z0-9]', para))
-                    para_len = chinese_count + (alnum_count * 0.5)
+                    # 重新利用等效算法计算加权分数时的合法长度
+                    para_len = self.get_token_length(para)
                     
                     is_ignored = para_len < self.MIN_VALID_CHARS
                     weight = 0 if is_ignored else para_len
@@ -202,7 +266,6 @@ class AIGCDetectionThread(QThread):
                 self.progress_signal.emit(30 + int(((idx + 1) / len(paragraphs)) * 65))
 
             avg = round(total_weighted_score / total_valid_weight, 2) if total_valid_weight > 0 else 0
-            # 将总体分率和消耗的 Token 一起发送给界面
             self.result_signal.emit({"total_ai_rate": avg, "paragraphs": results, "total_tokens": total_tokens})
 
         except Exception as e:
