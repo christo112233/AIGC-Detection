@@ -49,8 +49,8 @@ class AIGCDetectionThread(QThread):
         self.text = text
         self.model_path = model_path
         self.MIN_VALID_CHARS = 20
-        self.TEMPERATURE = 1.5
-        self.POWER_FACTOR = 2.0
+        self.TEMPERATURE = 2.0
+        self.POWER_FACTOR = 1.5
 
     def get_token_length(self, text):
         """
