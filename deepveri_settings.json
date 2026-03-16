@@ -1,0 +1,7 @@
+{
+    "temperature": 2.0,
+    "power_factor": 1.5,
+    "max_chunk_size": 700,
+    "min_valid_length": 20,
+    "force_cpu": false
+}

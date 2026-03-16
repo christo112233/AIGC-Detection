@@ -20,6 +20,7 @@ build/
 *.exe
 *.whl
 *.egg-info/
+build_app.py
 
 # 日志/临时文件
 *.log
