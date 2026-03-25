@@ -3,9 +3,10 @@ import os
 import html
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, QLabel, QFrame,
-    QFileDialog, QMessageBox, QSplitter, QScrollArea, QCheckBox, QPushButton, QDialog
+    QFileDialog, QMessageBox, QSplitter, QScrollArea, QCheckBox, QPushButton, QDialog,
+    QGridLayout, QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QCursor, QFont, QColor, QPalette 
 
 # --- 依赖库安全导入 ---
@@ -30,9 +31,9 @@ except ImportError:
 from ui_components import (
     Theme, ThreeDButton, GlowingButton, ModernProgressBar, 
     AIGCGaugeWidget, AIGCPieChart, HeatmapBar, DragTextEdit, ResultBlock, StatsDashboard, DetailedHeatmapWindow,
-    DeveloperConsole
+    DeveloperConsole, HistoryWindow, EmptyStateWidget
 )
-from core_engine import AIGCDetectionThread, get_resource_path, check_gpu_availability, load_settings, save_settings
+from core_engine import AIGCDetectionThread, get_resource_path, check_gpu_availability, load_settings, save_settings, load_history, save_history, clear_all_history
 
 # ---------------------- 静默硬件嗅探线程 ----------------------
 class HWScannerThread(QThread):
@@ -47,7 +48,7 @@ class HWScannerThread(QThread):
 class AIGCSentinel(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("DeepVeri - 智能溯源系统")
+        self.setWindowTitle("DeepVeri - AI 生成检测系统") 
         self.resize(1300, 850)
         
         # 状态变量
@@ -55,6 +56,7 @@ class AIGCSentinel(QMainWindow):
         self.model_path = ""
         self.last_results = []      
         self.detailed_heatmap_win = None 
+        self._is_restoring = False # 用于标记当前是否为恢复历史状态
         
         # 从本地 JSON 预载控制台底层参数
         self.engine_config = load_settings()
@@ -104,13 +106,18 @@ class AIGCSentinel(QMainWindow):
         self.title_lbl = QLabel("DeepVeri")
         self.title_lbl.setStyleSheet("font-size: 24px; font-weight: 900; letter-spacing: 1.5px;") 
         
-        self.sub_lbl = QLabel("深度学习文本溯源检测平台")
+        self.sub_lbl = QLabel("深度学习文本 AI 生成检测平台") 
         self.sub_lbl.setStyleSheet("font-size: 11px; font-weight: bold; letter-spacing: 1px; color: #2D79FF;")
         
         title_box.addWidget(self.title_lbl)
         title_box.addWidget(self.sub_lbl)
         header.addLayout(title_box)
         header.addSpacing(40)
+        
+        self.btn_history = GlowingButton("🕒  历史", variant="secondary", parent=self)
+        self.btn_history.setFixedWidth(85)
+        self.btn_history.clicked.connect(self.open_history)
+        header.addWidget(self.btn_history)
         
         self.btn_console = GlowingButton("⚙️  控制台", variant="secondary", parent=self)
         self.btn_console.setFixedWidth(90)
@@ -169,8 +176,14 @@ class AIGCSentinel(QMainWindow):
         self.card_output = QFrame() 
         out_outer_layout = QHBoxLayout(self.card_output)
         out_outer_layout.setContentsMargins(0, 10, 5, 10)
-        res_main_widget = QWidget()
-        res_main_layout = QVBoxLayout(res_main_widget)
+        
+        # --- 核心改动：搭建 QGridLayout 层叠布局 ---
+        self.right_stack_layout = QGridLayout()
+        self.right_stack_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # 1. 结果内容层
+        self.content_container = QWidget()
+        res_main_layout = QVBoxLayout(self.content_container)
         res_main_layout.setContentsMargins(0, 0, 0, 0)
         
         self.dashboard = StatsDashboard()
@@ -181,7 +194,7 @@ class AIGCSentinel(QMainWindow):
         self.token_counter = self.dashboard.token_counter
         
         ctrl_bar = QHBoxLayout()
-        self.label_output = QLabel("🔍  逐段溯源分析")
+        self.label_output = QLabel("🔍  逐段 AI 生成检测")
         self.label_output.setStyleSheet("font-weight: bold; font-size: 14px;")
         
         self.chk_only_high_risk = QCheckBox("只显示高风险内容 (>60%)")
@@ -204,11 +217,21 @@ class AIGCSentinel(QMainWindow):
         self.result_scroll.setWidget(self.result_container)
         res_main_layout.addWidget(self.result_scroll)
         
+        self.right_stack_layout.addWidget(self.content_container, 0, 0)
+        
+        # 2. 空状态屏层
+        self.empty_container = EmptyStateWidget()
+        self.right_stack_layout.addWidget(self.empty_container, 0, 0)
+        
+        # 3. 初始化面板可见性
+        self.content_container.hide()
+        self.empty_container.show()
+        
         self.heatmap = HeatmapBar()
         self.heatmap.clicked_section.connect(self.scroll_to_section) 
         self.heatmap.double_clicked.connect(self.show_detailed_heatmap)
 
-        out_outer_layout.addWidget(res_main_widget)
+        out_outer_layout.addLayout(self.right_stack_layout)
         out_outer_layout.addWidget(self.heatmap)
 
         splitter.addWidget(self.card_input)
@@ -244,20 +267,87 @@ class AIGCSentinel(QMainWindow):
         sb_layout.addWidget(self.progress_bar)
         layout.addWidget(status_bar)
 
+    # ------------------ 历史记录面板交互 ------------------
+    def open_history(self):
+        history_data = load_history()
+        self.history_dlg = HistoryWindow(history_data, self)
+        self.history_dlg.request_restore.connect(self.restore_from_history)
+        self.history_dlg.request_clear.connect(self.clear_history_data)
+        self.history_dlg.exec()
+
+    def clear_history_data(self):
+        reply = QMessageBox.question(
+            self, 
+            "确认清空", 
+            "确定要清空所有检测历史记录吗？\n此操作不可恢复。", 
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            clear_all_history()
+            
+            # 同步刷新，瞬间清空历史界面的内容
+            if hasattr(self, 'history_dlg') and self.history_dlg:
+                self.history_dlg.clear_list()
+                
+            QMessageBox.information(self, "成功", "历史记录已彻底清空。")
+
+    def restore_from_history(self, record):
+        """时光倒流：全盘复原历史记录界面"""
+        if self.detailed_heatmap_win:
+            self.detailed_heatmap_win.close()
+            
+        # --- 核心修复：传入 show_empty=False，防止清空时触发退回星星面板的动画，避免动画队列冲突死锁 ---
+        self.clear_content(show_empty=False) 
+        
+        # --- 触发面板切换动效 ---
+        self.show_content_panel()
+        
+        # 1. 恢复输入区
+        text = record.get("original_text", "")
+        html_content = f"<div style='line-height: 1.6;'>{html.escape(text).replace(chr(10), '<br>')}</div>"
+        self.input_edit.setHtml(html_content)
+        
+        # 2. 组装虚拟的结果数据
+        res = {
+            "total_ai_rate": record.get("total_ai_rate", 0),
+            "total_tokens": record.get("total_tokens", 0),
+            "paragraphs": record.get("paragraphs", [])
+        }
+        
+        # 3. 通知 process_results 这是一个恢复动作，不需要再次被存入历史记录
+        self._is_restoring = True
+        self.process_results(res)
+        self._is_restoring = False
+        
+        # 4. 界面反馈
+        self.status_text.setText(f"✅ 已成功恢复历史记录：{record.get('timestamp')}")
+        self.status_text.setStyleSheet(f"color: {Theme.ACCENT_GREEN.name()}; font-weight: bold; padding: 0 4px;")
+
     # ------------------ 控制台唤醒交互 ------------------
     def open_console(self):
-        """打开控制台，支持永久持久化"""
+        """打开控制台，具有硬件嗅探保护"""
         if not self.is_hw_scanned:
             QMessageBox.information(self, "稍等", "系统正在初始化并静默扫描底层显卡硬件池，请等待几秒钟再打开控制台。")
             return
             
-        dlg = DeveloperConsole(self.engine_config, self.has_gpu, self.gpu_name, self)
+        dlg = DeveloperConsole(
+            current_config=self.engine_config, 
+            has_gpu=self.has_gpu, 
+            gpu_name=self.gpu_name, 
+            parent=self
+        )
+        
         if dlg.exec() == QDialog.Accepted:
             self.engine_config = dlg.config
             save_settings(self.engine_config) 
             
             mode = "纯 CPU 算力接管" if self.engine_config['force_cpu'] else "智能硬件加速"
-            QMessageBox.information(self, "底层引擎参数已更新", f"新参数（切分阈值 {self.engine_config['max_chunk_size']} 等）已永久保存。\n将在下一次「开始深度检测」时以 {mode} 生效！")
+            QMessageBox.information(
+                self, 
+                "底层引擎参数已更新", 
+                f"新参数（切分阈值 {self.engine_config['max_chunk_size']} 等）已永久保存。\n"
+                f"将在下一次「开始深度检测」时以 {mode} 生效！"
+            )
             
             if self.engine_config['force_cpu']:
                 self.update_device_ui("🐢 预载：用户强制切断硬件加速 (CPU)", False)
@@ -334,8 +424,6 @@ class AIGCSentinel(QMainWindow):
 
     # ------------------ 业务核心：安全检测运行与终止 ------------------
     def run_detection(self):
-        """核心重构：支持一键终止的检测逻辑"""
-        # 修复命名冲突，使用 self.work_thread 替代 self.thread
         if hasattr(self, 'work_thread') and self.work_thread.isRunning():
             self.work_thread.stop()
             self.btn_detect.setEnabled(False)
@@ -353,9 +441,11 @@ class AIGCSentinel(QMainWindow):
             QTimer.singleShot(1500, lambda: self.btn_detect.setText("⚡  开始深度检测")) 
             return
             
-        # 变身为终止按钮
         self.btn_detect.setVariant("danger")
         self.btn_detect.setText("⏹️ 终止检测")
+        
+        # --- 触发面板切换 ---
+        self.show_content_panel()
         
         self.render_timer.stop()
         self.render_queue = []
@@ -368,7 +458,6 @@ class AIGCSentinel(QMainWindow):
         self.gauge.setValue(0)
         self.progress_bar.setValue(0)
         
-        # 启动检测线程
         self.work_thread = AIGCDetectionThread(text, self.model_path, config=self.engine_config)
         self.work_thread.status_signal.connect(lambda s: self.status_text.setText(s))
         self.work_thread.progress_signal.connect(self.progress_bar.setValue)
@@ -389,6 +478,15 @@ class AIGCSentinel(QMainWindow):
             return
         
         self.last_results = res.get("paragraphs", [])
+        
+        # --- 核心新增：检测完成后静默写入历史记录 ---
+        if not self._is_restoring:
+            save_history(
+                original_text=self.input_edit.toPlainText().strip(),
+                total_ai_rate=res["total_ai_rate"],
+                total_tokens=res.get("total_tokens", 0),
+                paragraphs=self.last_results
+            )
         
         self.gauge.setValue(res["total_ai_rate"])
         self.token_counter.set_data(res.get("total_tokens", 0))
@@ -425,7 +523,15 @@ class AIGCSentinel(QMainWindow):
             idx, p = self.render_queue.pop(0)
             use_anim = (idx < 10)
             
-            block = ResultBlock(idx, p["content"], p["ai_rate"], is_ignored=p.get("is_ignored", False), use_animation=use_anim)
+            # --- 核心改动：将 tokens 传导至 UI 组件 ---
+            block = ResultBlock(
+                index=idx, 
+                content=p["content"], 
+                ai_rate=p["ai_rate"], 
+                tokens=p.get("tokens", 0),
+                is_ignored=p.get("is_ignored", False), 
+                use_animation=use_anim
+            )
             block.request_scroll.connect(self.handle_block_resize) 
             block.request_highlight.connect(self.highlight_source_text) 
             block.expanded.connect(self.on_block_expanded) 
@@ -485,12 +591,17 @@ class AIGCSentinel(QMainWindow):
             self.highlight_source_text(target.content) 
 
     # ------------------ 文档处理与基础功能 ------------------
-    def clear_content(self):
+    # --- 核心修复：利用 *args 吸收点击信号，并增加 show_empty 控制参数 ---
+    def clear_content(self, *args, show_empty=True):
         self.render_timer.stop() 
         self.render_queue = []
         self.input_edit.clear()
         self.lbl_char_count.setText("字数: 0") 
         self.last_results = []
+        
+        # --- 触发面板切换动效 (切回空状态) ---
+        if show_empty:
+            self.show_empty_panel()
         
         while self.result_layout.count() > 0:
             item = self.result_layout.takeAt(0)
@@ -506,6 +617,92 @@ class AIGCSentinel(QMainWindow):
         if self.detailed_heatmap_win:
             self.detailed_heatmap_win.close() 
 
+    # ================= UI 级高级动效调度 =================
+    def show_content_panel(self):
+        """丝滑淡出空状态，展现数据看板 (通过剥离内层特效完美规避死锁)"""
+        if not self.content_container.isVisible():
+            # 1. 彻底剥离内部呼吸灯特效，防止嵌套死锁
+            if hasattr(self.empty_container, 'pause_breathing'):
+                self.empty_container.pause_breathing()
+
+            # 2. 赋予容器临时透明度特效
+            self.empty_eff = QGraphicsOpacityEffect()
+            self.empty_container.setGraphicsEffect(self.empty_eff)
+
+            self.content_eff = QGraphicsOpacityEffect()
+            self.content_eff.setOpacity(0.0)
+            self.content_container.setGraphicsEffect(self.content_eff)
+
+            self.content_container.show()
+
+            # 3. 交叉淡入淡出动画
+            self.fade_out_empty = QPropertyAnimation(self.empty_eff, b"opacity")
+            self.fade_out_empty.setDuration(300)
+            self.fade_out_empty.setStartValue(1.0)
+            self.fade_out_empty.setEndValue(0.0)
+            self.fade_out_empty.setEasingCurve(QEasingCurve.OutQuad)
+
+            self.fade_in_content = QPropertyAnimation(self.content_eff, b"opacity")
+            self.fade_in_content.setDuration(400)
+            self.fade_in_content.setStartValue(0.0)
+            self.fade_in_content.setEndValue(1.0)
+            self.fade_in_content.setEasingCurve(QEasingCurve.OutQuad)
+
+            def _on_fade_out():
+                self.empty_container.hide()
+                self.empty_container.setGraphicsEffect(None) # 销毁外层特效以释放内存
+
+            def _on_fade_in():
+                self.content_container.setGraphicsEffect(None) # 销毁外层特效以释放内存
+
+            self.fade_out_empty.finished.connect(_on_fade_out)
+            self.fade_in_content.finished.connect(_on_fade_in)
+
+            self.fade_out_empty.start()
+            self.fade_in_content.start()
+
+    def show_empty_panel(self):
+        """丝滑淡出数据看板，返回空状态"""
+        if self.content_container.isVisible():
+            # 1. 赋予临时特效
+            self.content_eff = QGraphicsOpacityEffect()
+            self.content_container.setGraphicsEffect(self.content_eff)
+
+            self.empty_eff = QGraphicsOpacityEffect()
+            self.empty_eff.setOpacity(0.0)
+            self.empty_container.setGraphicsEffect(self.empty_eff)
+
+            self.empty_container.show()
+
+            # 2. 交叉动画
+            self.fade_out_content = QPropertyAnimation(self.content_eff, b"opacity")
+            self.fade_out_content.setDuration(300)
+            self.fade_out_content.setStartValue(1.0)
+            self.fade_out_content.setEndValue(0.0)
+            self.fade_out_content.setEasingCurve(QEasingCurve.OutQuad)
+
+            self.fade_in_empty = QPropertyAnimation(self.empty_eff, b"opacity")
+            self.fade_in_empty.setDuration(400)
+            self.fade_in_empty.setStartValue(0.0)
+            self.fade_in_empty.setEndValue(1.0)
+            self.fade_in_empty.setEasingCurve(QEasingCurve.OutQuad)
+
+            def _on_fade_out():
+                self.content_container.hide()
+                self.content_container.setGraphicsEffect(None)
+
+            def _on_fade_in():
+                self.empty_container.setGraphicsEffect(None)
+                # 动画结束后，把被剥离的呼吸灯还给星星！
+                if hasattr(self.empty_container, 'resume_breathing'):
+                    self.empty_container.resume_breathing()
+
+            self.fade_out_content.finished.connect(_on_fade_out)
+            self.fade_in_empty.finished.connect(_on_fade_in)
+
+            self.fade_out_content.start()
+            self.fade_in_empty.start()
+
     def merge_all_lines(self):
         text = self.input_edit.toPlainText()
         if not text.strip(): 
@@ -519,7 +716,6 @@ class AIGCSentinel(QMainWindow):
         self.input_edit.setHtml(html_content)
         self.status_text.setText("✅ 已合并排版结构，并保持舒适行距")
 
-    # ================= 核心修复：全面恢复长文档、表格与PDF排版块读取 =================
     def handle_file_content(self, path):
         QApplication.setOverrideCursor(QCursor(Qt.WaitCursor)) 
         try:
@@ -531,19 +727,14 @@ class AIGCSentinel(QMainWindow):
                     raw = f.read()
                 encoding = chardet.detect(raw)['encoding'] if HAS_CHARDET else 'utf-8'
                 content = raw.decode(encoding, errors='ignore')
-                
             elif ext == '.docx':
                 if not HAS_DOCX:
                     raise Exception("缺失 python-docx 库")
                 doc = docx.Document(path)
                 text_parts = []
-                
-                # 恢复：提取所有段落内容
                 for para in doc.paragraphs:
                     if para.text.strip():
                         text_parts.append(para.text.strip())
-                        
-                # 恢复：提取所有表格内容，防止遗漏数据框中的文字
                 for table in doc.tables:
                     for row in table.rows:
                         unique_cells = []
@@ -559,31 +750,24 @@ class AIGCSentinel(QMainWindow):
                                 row_text_list.append(txt)
                         if row_text_list:
                             text_parts.append(" | ".join(row_text_list))
-                            
                 content = "\n\n".join(text_parts)
-                
             elif ext == '.pdf':
                 if not HAS_PDF:
                     raise Exception("缺失 PyMuPDF 库")
                 import re
                 doc = fitz.open(path)
                 text_parts = []
-                
-                # 恢复：使用区块 (blocks) 抓取，防止复杂的论文排版被强行截断丢失
                 for page in doc:
                     blocks = page.get_text("blocks")
                     for b in blocks:
-                        if b[6] == 0:  # 0 代表文本块 (Text Block)
+                        if b[6] == 0:  
                             text = b[4].strip()
                             if text:
-                                # 智能拼接被强行回车切断的中文句子
                                 text = re.sub(r'([\u4e00-\u9fa5])\s*\n\s*([\u4e00-\u9fa5])', r'\1\2', text)
                                 text = text.replace('\n', ' ')
                                 text_parts.append(text)
-                                
                 content = "\n\n".join(text_parts)
             
-            # 使用带 1.6 倍行高的 HTML 包装展示文本，兼顾阅读体验和性能
             html_content = f"<div style='line-height: 1.6;'>{html.escape(content).replace(chr(10), '<br>')}</div>"
             self.input_edit.setHtml(html_content)
             self.status_text.setText(f"已成功加载并提取全部内容: {os.path.basename(path)}")
@@ -616,14 +800,6 @@ class AIGCSentinel(QMainWindow):
         palette.setColor(QPalette.Highlight, Theme.ACCENT_BLUE)
         QApplication.setPalette(palette)
         
-        sb_css = """
-            QScrollBar:vertical { border: none; background: transparent; width: 8px; }
-            QScrollBar::handle:vertical { background: rgba(255, 255, 255, 0.15); border-radius: 4px; min-height: 30px; }
-            QScrollBar::handle:vertical:hover { background: rgba(255, 255, 255, 0.3); }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: none; border: none; }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
-        """
-        
         self.setStyleSheet(f"""
             QMainWindow, #centralWidget {{ background-color: {t['bg_main']}; }}
             QSplitter::handle {{ background: transparent; }}
@@ -631,7 +807,7 @@ class AIGCSentinel(QMainWindow):
             QCheckBox {{ color: {t['text_sub']}; font-family: 'Microsoft YaHei'; font-weight: bold; }}
             QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 6px; border: 1px solid {t['border']}; }}
             QCheckBox::indicator:checked {{ background-color: #3B82F6; border-color: #3B82F6; image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwb2x5bGluZSBwb2ludHM9IjIwIDYgOSAxNyA0IDEyIi8+PC9zdmc+); }}
-            {sb_css}
+            {Theme.SCROLLBAR_CSS}
         """)
         
         self.input_edit.setStyleSheet(f"""
