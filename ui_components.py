@@ -5,7 +5,7 @@ import os
 from PySide6.QtWidgets import (
     QWidget, QPushButton, QLabel, QFrame, QTextEdit, QHBoxLayout, QVBoxLayout, 
     QSizePolicy, QGraphicsDropShadowEffect, QGraphicsOpacityEffect, QScrollArea, 
-    QDialog, QCheckBox, QSlider, QGridLayout, QLineEdit
+    QDialog, QCheckBox, QSlider, QGridLayout, QLineEdit, QMessageBox, QApplication
 )
 from PySide6.QtCore import (
     Qt, Property, QPropertyAnimation, QEasingCurve, QRectF, QPointF, Signal, QSize, QTimer
@@ -41,6 +41,21 @@ class Theme:
     ACCENT_YELLOW = QColor(245, 158, 11) 
     ACCENT_BLUE = QColor(59, 130, 246)   
     ACCENT_GRAY = QColor(156, 163, 175)  
+
+    # --- 核心美化：横竖滚动条统一全圆角隐藏式设计 ---
+    SCROLLBAR_CSS = """
+        QScrollBar:vertical { border: none; background: transparent; width: 8px; margin: 0px; }
+        QScrollBar::handle:vertical { background: rgba(255, 255, 255, 0.15); border-radius: 4px; min-height: 30px; }
+        QScrollBar::handle:vertical:hover { background: rgba(255, 255, 255, 0.3); }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: none; border: none; }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
+        
+        QScrollBar:horizontal { border: none; background: transparent; height: 8px; margin: 0px; }
+        QScrollBar::handle:horizontal { background: rgba(255, 255, 255, 0.15); border-radius: 4px; min-width: 30px; }
+        QScrollBar::handle:horizontal:hover { background: rgba(255, 255, 255, 0.3); }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; background: none; border: none; }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
+    """
 
     @classmethod
     def get(cls, key):
@@ -78,7 +93,6 @@ class GlowingButton(QPushButton):
         self.press_anim.setEasingCurve(QEasingCurve.OutQuart)
 
     def setVariant(self, variant):
-        """支持动态更改危险/主色调，用于停止按钮切换"""
         self.variant = variant
         self.update()
 
@@ -172,6 +186,7 @@ class GlowingButton(QPushButton):
         p.setPen(text_c)
         offset_y = 1 if 0.0 < self._press_progress < 0.3 else 0
         p.drawText(QRectF(0, offset_y, w, h), Qt.AlignCenter, self.text())
+        p.end()
 
 class ThreeDButton(GlowingButton):
     pass
@@ -197,6 +212,7 @@ class ModernProgressBar(QWidget):
         p.drawRoundedRect(rect, 2, 2)
         
         if self._value <= 0:
+            p.end()
             return
             
         w = rect.width() * (self._value / 100.0)
@@ -206,6 +222,7 @@ class ModernProgressBar(QWidget):
         
         p.setBrush(grad)
         p.drawRoundedRect(QRectF(0, 0, w, rect.height()), 2, 2)
+        p.end()
 
 # ---------------------- 可视化组件 ----------------------
 class AIGCGaugeWidget(QWidget):
@@ -317,7 +334,7 @@ class AIGCGaugeWidget(QWidget):
         p.setPen(QPen(pointer_c, 3))
         p.drawEllipse(-6, -6, 12, 12)
         p.restore()
-
+        p.end()
 
 class AIGCPieChart(QWidget):
     def __init__(self, parent=None):
@@ -451,6 +468,7 @@ class AIGCPieChart(QWidget):
         if total == 0:
             p.setPen(QPen(QColor(255, 255, 255, 20), 16))
             p.drawArc(QRectF(center_x - base_radius, center_y - base_radius, base_radius * 2, base_radius * 2), 0, 360 * 16)
+            p.end()
             return
 
         start_angle = 90 * 16 
@@ -518,6 +536,8 @@ class AIGCPieChart(QWidget):
                 
             p.setPen(text_c)
             p.drawText(QRectF(box_x + 22, legend_y + i * 32 - 10, 150, 30), Qt.AlignLeft | Qt.AlignVCenter | Qt.TextDontClip, f"{label}: {self.counts[i]}")
+            
+        p.end()
 
 class TokenCounterWidget(QWidget):
     def __init__(self, parent=None):
@@ -554,7 +574,6 @@ class TokenCounterWidget(QWidget):
         avail_w = max(1, self.width() - pad * 2)
         avail_h = max(1, self.height() - pad * 2)
         
-        # 将逻辑画布放宽至 190.0，彻底避免右括号被切割
         logical_w = 190.0
         logical_h = 190.0
         
@@ -573,6 +592,7 @@ class TokenCounterWidget(QWidget):
         p.setFont(QFont("Consolas", 36, QFont.Bold))
         p.setPen(Theme.ACCENT_BLUE)
         p.drawText(QRectF(0, 80, logical_w, 60), Qt.AlignCenter, f"{self._current_value:,}")
+        p.end()
 
 class StatsDashboard(QFrame):
     def __init__(self, parent=None):
@@ -741,6 +761,7 @@ class HeatmapBar(QWidget):
             p.setBrush(c)
             p.drawRoundedRect(QRectF(w / 2 - cw / 2, cur_y + 0.75, cw, dh), cw / 2, cw / 2)
             cur_y += bh
+        p.end()
 
 class DragTextEdit(QTextEdit):
     file_dropped = Signal(str)
@@ -814,6 +835,7 @@ class DragTextEdit(QTextEdit):
             p.setPen(QPen(c, 6 * self._glow_strength))
             p.setBrush(Qt.NoBrush)
             p.drawRoundedRect(self.viewport().rect().adjusted(2, 2, -2, -2), 12, 12)
+            p.end()
 
     def highlight_paragraph(self, content):
         if not content:
@@ -828,13 +850,96 @@ class DragTextEdit(QTextEdit):
             self.ensureCursorVisible()
             self.setFocus()
 
-# ================= 优化：延迟渲染结果块 =================
+
+# ================= 惊艳的空状态呼吸灯组件 =================
+class BreathingLogo(QLabel):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setAlignment(Qt.AlignCenter)
+        self.setFont(QFont("Segoe UI", 72, QFont.Bold))
+        self.setStyleSheet(f"color: {Theme.ACCENT_BLUE.name()};")
+        self.anim = None
+        self.eff = None
+        
+        # 初始启动
+        self.resume_effect()
+
+    def _toggle_direction(self):
+        if not self.anim:
+            return
+        if self.anim.direction() == QPropertyAnimation.Forward:
+            self.anim.setDirection(QPropertyAnimation.Backward)
+        else:
+            self.anim.setDirection(QPropertyAnimation.Forward)
+        self.anim.start()
+
+    def pause_effect(self):
+        """剥离自身特效，防止在外层做淡入淡出时发生特效嵌套死锁"""
+        if self.anim:
+            self.anim.stop()
+            try:
+                self.anim.finished.disconnect(self._toggle_direction)
+            except:
+                pass
+            self.anim = None
+            
+        # 【核心修复】：Qt 的 setGraphicsEffect(None) 会在底层 C++ 中直接销毁原有的 Effect 对象
+        self.setGraphicsEffect(None)
+        self.eff = None
+
+    def resume_effect(self):
+        """恢复自身的呼吸特效（每次重新构建以完美规避 C++ 底层销毁陷阱）"""
+        self.pause_effect() # 确保清理干净
+        
+        self.eff = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self.eff)
+        
+        self.anim = QPropertyAnimation(self.eff, b"opacity")
+        self.anim.setDuration(1500) 
+        self.anim.setStartValue(0.15)
+        self.anim.setEndValue(0.9)
+        self.anim.setEasingCurve(QEasingCurve.InOutSine)
+        self.anim.finished.connect(self._toggle_direction)
+        self.anim.start()
+
+class EmptyStateWidget(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 40, 20, 40)
+        lay.addStretch()
+        
+        self.logo = BreathingLogo("✨")
+        lay.addWidget(self.logo)
+        
+        self.title = QLabel("DeepVeri 处于就绪状态")
+        self.title.setAlignment(Qt.AlignCenter)
+        self.title.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
+        self.title.setStyleSheet(f"color: {Theme.get('text_main')}; margin-top: 20px;")
+        lay.addWidget(self.title)
+        
+        self.sub = QLabel("请在左侧输入文本或拖入文档，点击「开始深度检测」\n系统将为您展开像素级的 AI 生成检测。")
+        self.sub.setAlignment(Qt.AlignCenter)
+        self.sub.setFont(QFont("Microsoft YaHei", 11))
+        self.sub.setStyleSheet(f"color: {Theme.get('text_sub')}; line-height: 1.6; margin-top: 10px;")
+        lay.addWidget(self.sub)
+        
+        lay.addStretch()
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def pause_breathing(self):
+        self.logo.pause_effect()
+
+    def resume_breathing(self):
+        self.logo.resume_effect()
+
+# ================= 极致流体的结果卡片 =================
 class ResultBlock(QWidget):
     request_scroll = Signal()
     request_highlight = Signal(str)
     expanded = Signal(int)
 
-    def __init__(self, index, content, ai_rate, is_ignored=False, use_animation=True, parent=None):
+    def __init__(self, index, content, ai_rate, tokens=0, is_ignored=False, use_animation=True, parent=None):
         super().__init__(parent)
         self.index = index
         self.content = content
@@ -873,6 +978,10 @@ class ResultBlock(QWidget):
         hl.setContentsMargins(15, 10, 15, 10)
         
         self.idx_l = QLabel(f"#{index + 1}")
+        
+        self.token_l = QLabel(f"⚡ {tokens} Tokens")
+        self.token_l.setStyleSheet(f"color: {Theme.ACCENT_BLUE.name()}; font-size: 11px; font-weight: bold; font-family: Consolas; background-color: rgba(59, 130, 246, 0.1); border-radius: 6px; padding: 3px 8px;")
+        
         self.risk_l = QLabel(f"{int(ai_rate)}% {self.verdict}")
         self.risk_l.setAlignment(Qt.AlignCenter)
         
@@ -880,20 +989,44 @@ class ResultBlock(QWidget):
         self.prev_l = QLabel(preview_text)
         self.prev_l.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         
+        self.btn_copy = QPushButton("📋")
+        self.btn_copy.setFixedSize(26, 26)
+        self.btn_copy.setCursor(Qt.PointingHandCursor)
+        self.btn_copy.setToolTip("一键复制此高危段落")
+        self.btn_copy.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {Theme.get('text_sub')};
+                border-radius: 6px;
+                font-size: 14px;
+                padding-bottom: 2px;
+            }}
+            QPushButton:hover {{
+                background: rgba(255,255,255,0.1);
+                color: {Theme.get('text_main')};
+            }}
+        """)
+        self.btn_copy.clicked.connect(self._copy_content)
+        
         self.arr_l = QLabel("▼")
         
         hl.addWidget(self.idx_l)
-        hl.addSpacing(5)
+        hl.addSpacing(8)
+        hl.addWidget(self.token_l)
+        hl.addSpacing(8)
         hl.addWidget(self.risk_l)
-        hl.addSpacing(10)
+        hl.addSpacing(12)
         hl.addWidget(self.prev_l)
+        hl.addSpacing(5)
+        hl.addWidget(self.btn_copy)
+        hl.addSpacing(2)
         hl.addWidget(self.arr_l)
         
         self.lay.addWidget(self.head)
         
         self.wrap = QScrollArea()
         self.wrap.setFrameShape(QFrame.NoFrame)
-        self.wrap.setWidgetResizable(True)
+        self.wrap.setWidgetResizable(True) # 开启自适应机制，放弃定宽焊死
         self.wrap.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.wrap.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.wrap.setStyleSheet("background: transparent; border: none;")
@@ -902,8 +1035,6 @@ class ResultBlock(QWidget):
         self.lay.addWidget(self.wrap)
         
         self.h_anim = QPropertyAnimation(self.wrap, b"maximumHeight")
-        self.h_anim.setDuration(350)
-        self.h_anim.setEasingCurve(QEasingCurve.OutCubic)
         self.h_anim.finished.connect(self._on_anim_finished)
         
         self.update_style()
@@ -966,13 +1097,17 @@ class ResultBlock(QWidget):
         
         cf.setStyleSheet(f"QFrame {{ background-color: {Theme.get('input_bg')}; border: 1px solid {Theme.get('border')}; border-top: none; border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }}")
         
+        self.inner_eff = QGraphicsOpacityEffect()
+        self.inner_eff.setOpacity(0.0)
+        cf.setGraphicsEffect(self.inner_eff)
+        
+        self.fade_anim = QPropertyAnimation(self.inner_eff, b"opacity")
+        
         self.wrap.setWidget(cf)
         self.is_init = True
 
     def toggle_expand(self):
-        if self.h_anim.state() == QPropertyAnimation.Running:
-            return
-            
+        # 允许半途折返，极致流畅
         self._ensure_content_initialized()
         self.is_expanded = not self.is_expanded
         
@@ -981,17 +1116,27 @@ class ResultBlock(QWidget):
             self.prev_l.hide()
             self.arr_l.setText("▲")
             
-            self.head.layout().activate()
-            w = self.width()
-            self.wrap.widget().setFixedWidth(w)
-            self.wrap.widget().layout().activate()
-            self.wrap.widget().adjustSize()
-            target_h = self.wrap.widget().height()
+            # --- 核心修复：短暂约束宽度供高度计算，计算完瞬间释放防乱码 ---
+            vp_w = self.wrap.viewport().width()
+            if vp_w < 50: vp_w = self.width() - 10
+            self.wrap.widget().setFixedWidth(vp_w)
+            target_h = self.wrap.widget().sizeHint().height()
+            self.wrap.widget().setMinimumWidth(0)
+            self.wrap.widget().setMaximumWidth(16777215)
             
             self.h_anim.stop()
-            self.h_anim.setStartValue(0)
+            self.h_anim.setStartValue(self.wrap.height())
             self.h_anim.setEndValue(target_h)
+            self.h_anim.setEasingCurve(QEasingCurve.OutQuint) # 爆速流体弹开曲线
+            self.h_anim.setDuration(400)
+            
+            self.fade_anim.stop()
+            self.fade_anim.setStartValue(self.inner_eff.opacity())
+            self.fade_anim.setEndValue(1.0)
+            self.fade_anim.setDuration(350)
+            
             self.h_anim.start()
+            self.fade_anim.start()
             self.expanded.emit(self.index)
         else:
             self.prev_l.show()
@@ -1000,7 +1145,16 @@ class ResultBlock(QWidget):
             self.h_anim.stop()
             self.h_anim.setStartValue(self.wrap.height())
             self.h_anim.setEndValue(0)
+            self.h_anim.setEasingCurve(QEasingCurve.InOutQuad) # 极致丝滑缓冲缩回
+            self.h_anim.setDuration(350)
+            
+            self.fade_anim.stop()
+            self.fade_anim.setStartValue(self.inner_eff.opacity())
+            self.fade_anim.setEndValue(0.0)
+            self.fade_anim.setDuration(200)
+            
             self.h_anim.start()
+            self.fade_anim.start()
             
         self.update_style()
         self.request_scroll.emit()
@@ -1009,9 +1163,18 @@ class ResultBlock(QWidget):
         if not self.is_expanded:
             self.wrap.hide()
         else:
-            h = self.wrap.widget().height()
-            self.wrap.setMinimumHeight(h)
-            self.wrap.setMaximumHeight(h)
+            # 彻底摒弃暴力的 minimumHeight 硬锁定，消除塌陷跳动感
+            self.wrap.setMaximumHeight(16777215) 
+
+    def _copy_content(self):
+        QApplication.clipboard().setText(self.content)
+        self.btn_copy.setText("✅")
+        self.btn_copy.setStyleSheet(f"QPushButton {{ background: transparent; color: {Theme.ACCENT_GREEN.name()}; border-radius: 6px; font-size: 14px; }}")
+        QTimer.singleShot(2000, self._reset_copy_btn)
+
+    def _reset_copy_btn(self):
+        self.btn_copy.setText("📋")
+        self.btn_copy.setStyleSheet(f"QPushButton {{ background: transparent; color: {Theme.get('text_sub')}; border-radius: 6px; font-size: 14px; padding-bottom: 2px; }} QPushButton:hover {{ background: rgba(255,255,255,0.1); color: {Theme.get('text_main')}; }}")
 
     def mousePressEvent(self, e):
         self.toggle_expand()
@@ -1021,7 +1184,7 @@ class ResultBlock(QWidget):
         if self.is_expanded != exp:
             self.toggle_expand()
 
-# ================= 全景视图与高级控制台组件 =================
+# ================= 全景视图 =================
 class DetailedHeatmapRow(QFrame):
     clicked = Signal(int)
 
@@ -1095,7 +1258,7 @@ class DetailedHeatmapWindow(QDialog):
 
     def __init__(self, paragraphs, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("全景热力指纹分析")
+        self.setWindowTitle("全景 AI 检测视图") 
         self.resize(550, 700)
         self.paragraphs = paragraphs
         
@@ -1121,7 +1284,7 @@ class DetailedHeatmapWindow(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
         
-        self.header = QLabel("🔍  全景段落过滤视图")
+        self.header = QLabel("🔍  全景 AI 检测视图") 
         self.header.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
         layout.addWidget(self.header)
         
@@ -1176,20 +1339,12 @@ class DetailedHeatmapWindow(QDialog):
         palette.setColor(QPalette.WindowText, QColor(t['text_main']))
         self.setPalette(palette)
         
-        scrollbar_css = """
-            QScrollBar:vertical { border: none; background: transparent; width: 8px; }
-            QScrollBar::handle:vertical { background: rgba(255, 255, 255, 0.15); border-radius: 4px; min-height: 30px; }
-            QScrollBar::handle:vertical:hover { background: rgba(255, 255, 255, 0.3); }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; background: none; border: none; }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
-        """
-        
         self.setStyleSheet(f"""
             QDialog {{ background-color: {t['bg_main']}; color: {t['text_main']}; }}
             QCheckBox {{ color: {t['text_sub']}; font-weight: bold; spacing: 8px; }}
             QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 4px; border: 1px solid {t['border']}; }}
             QCheckBox::indicator:checked {{ background-color: #3B82F6; border-color: #3B82F6; image: url(data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIzIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiPjxwb2x5bGluZSBwb2ludHM9IjIwIDYgOSAxNyA0IDEyIi8+PC9zdmc+); }}
-            {scrollbar_css}
+            {Theme.SCROLLBAR_CSS}
         """)
         
         self.scroll.setStyleSheet("QScrollArea { background: transparent; border: none; } QScrollArea > QWidget > QWidget { background: transparent; }")
@@ -1197,12 +1352,13 @@ class DetailedHeatmapWindow(QDialog):
         for r in self.rows:
             r.update_style()
 
-# ================= 🚀 全新开发者控制台 UI (手动输入版) =================
+# ================= 🚀 开发者控制台 =================
 class DeveloperConsole(QDialog):
-    """底层引擎高级参数接管控制台，采用精准的手动数值输入"""
-    def __init__(self, current_config, has_gpu, gpu_name, parent=None):
+    """底层引擎高级参数接管控制台"""
+    def __init__(self, current_config, has_gpu, gpu_name, is_default_mode=False, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("底层引擎控制台")
+        self.is_default_mode = is_default_mode
+        self.setWindowTitle("修改默认值" if is_default_mode else "开发者控制台")
         self.resize(500, 650)
         self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
         
@@ -1233,12 +1389,17 @@ class DeveloperConsole(QDialog):
 
         # 标题区
         head_lay = QVBoxLayout()
-        title = QLabel("⚙️ 底层引擎高级控制台")
-        title.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
-        
-        sub_title = QLabel("危险操作！调整不当可能导致模型输出崩溃或彻底失去准确性。")
-        sub_title.setStyleSheet("color: #EF4444; font-size: 11px;")
-        
+        if not self.is_default_mode:
+            title = QLabel("⚙️ 开发者控制台")
+            title.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
+            sub_title = QLabel("危险操作！调整不当可能导致模型输出崩溃或彻底失去准确性。")
+            sub_title.setStyleSheet("color: #EF4444; font-size: 11px;")
+        else:
+            title = QLabel("⚙️ 修改全局默认值")
+            title.setFont(QFont("Microsoft YaHei", 18, QFont.Bold))
+            sub_title = QLabel("您正在修改系统的基准默认值，这会影响以后所有【恢复默认】的行为。")
+            sub_title.setStyleSheet("color: #10B981; font-size: 11px;")
+            
         head_lay.addWidget(title)
         head_lay.addWidget(sub_title)
         main_lay.addLayout(head_lay)
@@ -1272,7 +1433,7 @@ class DeveloperConsole(QDialog):
         hw_lay.addWidget(self.hw_warn_lbl)
         main_lay.addWidget(hw_group)
 
-        # --- 核心区 2：模型推理参数 (手动输入版) ---
+        # --- 核心区 2：模型推理参数 ---
         param_group = QFrame()
         param_group.setObjectName("ControlGroup")
         p_lay = QVBoxLayout(param_group)
@@ -1282,7 +1443,6 @@ class DeveloperConsole(QDialog):
         p_title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
         p_lay.addWidget(p_title)
         
-        # 封装文本输入框创建逻辑
         def add_number_input(key, label_text, default_val, is_float):
             row = QHBoxLayout()
             
@@ -1294,7 +1454,6 @@ class DeveloperConsole(QDialog):
             input_field.setFixedWidth(100)
             input_field.setAlignment(Qt.AlignCenter)
             
-            # 为输入框应用深色极简风格
             input_field.setStyleSheet(f"""
                 QLineEdit {{
                     background-color: {Theme.get('input_bg')};
@@ -1319,7 +1478,6 @@ class DeveloperConsole(QDialog):
             self.inputs[key] = (input_field, is_float)
 
         c = self.config
-        # 更新默认参数值为最新的 2.0 和 1.5
         add_number_input('temperature', "温度系数 (Temperature) 🌶️", c.get('temperature', 2.0), True)
         add_number_input('power_factor', "指数惩罚因子 (Power Factor) 📈", c.get('power_factor', 1.5), True)
         add_number_input('max_chunk_size', "动态切分阈值 (Max Chunk) ✂️", c.get('max_chunk_size', 700), False)
@@ -1331,21 +1489,39 @@ class DeveloperConsole(QDialog):
         # 底部操作区
         bot_lay = QHBoxLayout()
         
-        btn_reset = GlowingButton("恢复默认", variant="secondary")
-        btn_reset.setFixedWidth(100)
-        btn_reset.clicked.connect(self.reset_default)
+        if not self.is_default_mode:
+            btn_reset = GlowingButton("恢复默认", variant="secondary")
+            btn_reset.setFixedWidth(100)
+            btn_reset.clicked.connect(self.reset_default)
+            
+            btn_edit_defaults = GlowingButton("修改默认", variant="secondary")
+            btn_edit_defaults.setFixedWidth(110)
+            btn_edit_defaults.clicked.connect(self.open_defaults_editor)
+            
+            bot_lay.addWidget(btn_reset)
+            bot_lay.addWidget(btn_edit_defaults)
+            
+        bot_lay.addStretch()
         
-        btn_apply = GlowingButton("保存并生效", variant="primary")
-        btn_apply.setFixedWidth(120)
+        btn_apply_text = "保存" if self.is_default_mode else "保存并生效"
+        btn_apply_width = 100 if self.is_default_mode else 120
+        
+        btn_apply = GlowingButton(btn_apply_text, variant="primary")
+        btn_apply.setFixedWidth(btn_apply_width)
         btn_apply.clicked.connect(self.accept)
         
-        bot_lay.addWidget(btn_reset)
-        bot_lay.addStretch()
         bot_lay.addWidget(btn_apply)
         main_lay.addLayout(bot_lay)
 
+    def open_defaults_editor(self):
+        from core_engine import load_factory_defaults, save_factory_defaults
+        defaults = load_factory_defaults()
+        dlg = DeveloperConsole(defaults, self.has_gpu, self.gpu_name, is_default_mode=True, parent=self)
+        if dlg.exec() == QDialog.Accepted:
+            save_factory_defaults(dlg.config)
+            QMessageBox.information(self, "成功", "全局默认值已成功修改！\n点击【恢复默认】即可载入您的新配置。")
+
     def switch_hw(self, force_cpu):
-        """处理硬件开关逻辑"""
         if not self.has_gpu and not force_cpu:
             self.hw_warn_lbl.setText("❌ 系统未检测到受支持的 GPU 或驱动，已永久锁定为 CPU 运算模式。")
             self.hw_warn_lbl.setStyleSheet("color: #EF4444; font-weight: bold; margin-top: 5px;")
@@ -1366,42 +1542,29 @@ class DeveloperConsole(QDialog):
             self.hw_warn_lbl.setStyleSheet("color: #10B981; font-weight: bold; margin-top: 5px;")
 
     def load_data(self):
-        """将后台配置注入 UI"""
         c = self.config
-        
         self.inputs['temperature'][0].setText(str(c.get('temperature', 2.0)))
         self.inputs['power_factor'][0].setText(str(c.get('power_factor', 1.5)))
         self.inputs['max_chunk_size'][0].setText(str(c.get('max_chunk_size', 700)))
         self.inputs['min_valid_length'][0].setText(str(c.get('min_valid_length', 20)))
-        
         self.switch_hw(c.get('force_cpu', False))
 
     def reset_default(self):
-        """一键恢复原厂安全配置"""
-        self.config = {
-            'temperature': 2.0,
-            'power_factor': 1.5,
-            'max_chunk_size': 700,
-            'min_valid_length': 20,
-            'force_cpu': False
-        }
+        from core_engine import load_factory_defaults
+        self.config = load_factory_defaults()
         self.load_data()
 
     def accept(self):
-        """在关闭对话框前，安全地解析所有输入框内的文本"""
         for key, (field, is_float) in self.inputs.items():
             txt = field.text().strip()
             try:
-                # 容错处理：确保输入合法
                 val = float(txt) if is_float else int(float(txt))
                 self.config[key] = val
             except ValueError:
-                pass # 如果输入了非法字符，直接忽略该项更改，保留原值
-                
+                pass
         super().accept()
 
     def update_theme(self):
-        """主题刷新"""
         t = Theme.COLORS['dark']
         
         palette = self.palette()
@@ -1424,4 +1587,182 @@ class DeveloperConsole(QDialog):
             QPushButton:checked {{
                 background-color: {Theme.ACCENT_BLUE.name()}; color: white; border: none;
             }}
+            {Theme.SCROLLBAR_CSS}
         """)
+
+# ================= 🚀 历史记录抽屉 UI =================
+class HistoryRow(QFrame):
+    """历史记录列表单行组件"""
+    restore_clicked = Signal(dict)
+    
+    def __init__(self, record, parent=None):
+        super().__init__(parent)
+        self.record = record
+        self.setFixedHeight(70)
+        self.setCursor(Qt.PointingHandCursor)
+        
+        timestamp = record.get("timestamp", "未知时间")
+        ai_rate = record.get("total_ai_rate", 0)
+        
+        # 获取纯文本预览
+        raw_text = record.get("original_text", "")
+        text_preview = raw_text[:40].replace("\n", " ") + ("..." if len(raw_text) > 40 else "")
+        
+        self.update_colors(ai_rate)
+        
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(15, 10, 15, 10)
+        layout.setSpacing(15)
+        
+        # 左侧：时间和 Tokens
+        time_lay = QVBoxLayout()
+        time_lbl = QLabel(timestamp)
+        time_lbl.setStyleSheet(f"color: {Theme.get('text_main')}; font-weight: bold; font-family: 'Segoe UI';")
+        
+        token_lbl = QLabel(f"Tokens: {record.get('total_tokens', 0)}")
+        token_lbl.setStyleSheet(f"color: {Theme.get('text_sub')}; font-size: 10px;")
+        
+        time_lay.addWidget(time_lbl)
+        time_lay.addWidget(token_lbl)
+        
+        # 中间：预览文本
+        preview_lbl = QLabel(text_preview)
+        preview_lbl.setStyleSheet(f"color: {Theme.get('text_sub')};")
+        preview_lbl.setWordWrap(True)
+        
+        # 右侧：得分 Badge
+        score_lbl = QLabel(f"{int(ai_rate)}%")
+        score_lbl.setAlignment(Qt.AlignCenter)
+        score_lbl.setFixedSize(45, 24)
+        score_lbl.setStyleSheet(f"background-color: {self.accent_bg}; color: {self.accent_color}; border-radius: 12px; font-weight: bold;")
+        
+        # 载入按钮
+        btn_restore = GlowingButton("载入", variant="primary")
+        btn_restore.setFixedSize(60, 28)
+        btn_restore.clicked.connect(lambda: self.restore_clicked.emit(self.record))
+        
+        layout.addLayout(time_lay)
+        layout.addWidget(preview_lbl, 1)
+        layout.addWidget(score_lbl)
+        layout.addWidget(btn_restore)
+        
+        self.update_style()
+
+    def update_colors(self, ai_rate):
+        if ai_rate < 30:
+            r, g, b = 16, 185, 129
+        elif ai_rate < 60:
+            r, g, b = 245, 158, 11
+        else:
+            r, g, b = 239, 68, 68
+            
+        self.accent_color = QColor(r, g, b).name()
+        self.accent_bg = f"rgba({r}, {g}, {b}, 0.15)"
+
+    def update_style(self):
+        bg = Theme.get('bg_card')
+        bd = Theme.get('border')
+        hover_bg = QColor(bg).lighter(104).name()
+        
+        self.setStyleSheet(f"HistoryRow {{ background-color: {bg}; border: 1px solid {bd}; border-radius: 12px; }} HistoryRow:hover {{ background-color: {hover_bg}; }}")
+
+
+class HistoryWindow(QDialog):
+    """历史记录模态窗口"""
+    request_restore = Signal(dict)
+    request_clear = Signal()
+    
+    def __init__(self, history_data, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("本地检测历史")
+        self.resize(600, 500)
+        self.history_data = history_data
+        
+        self.setWindowFlags(Qt.Window | Qt.WindowCloseButtonHint)
+        self.setWindowOpacity(0.0)
+        
+        self.anim = QPropertyAnimation(self, b"windowOpacity")
+        self.anim.setDuration(250)
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        
+        self.init_ui()
+        self.update_theme()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self.anim.start()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
+        
+        # 头部
+        header_lay = QHBoxLayout()
+        title = QLabel("🕒 历史检测记录 (最近10次)")
+        title.setFont(QFont("Microsoft YaHei", 14, QFont.Bold))
+        
+        btn_clear = GlowingButton("🗑️ 清空所有记录", variant="danger")
+        btn_clear.setFixedWidth(140)
+        btn_clear.clicked.connect(self.request_clear.emit)
+        
+        header_lay.addWidget(title)
+        header_lay.addStretch()
+        header_lay.addWidget(btn_clear)
+        layout.addLayout(header_lay)
+        
+        # 滚动列表
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        
+        self.container = QWidget()
+        self.list_layout = QVBoxLayout(self.container)
+        self.list_layout.setAlignment(Qt.AlignTop)
+        self.list_layout.setSpacing(10)
+        
+        self.scroll.setWidget(self.container)
+        layout.addWidget(self.scroll)
+        
+        if not self.history_data:
+            empty_lbl = QLabel("暂无任何本地检测记录。")
+            empty_lbl.setAlignment(Qt.AlignCenter)
+            empty_lbl.setStyleSheet("color: #9CA3AF; font-size: 13px; margin-top: 50px;")
+            self.list_layout.addWidget(empty_lbl)
+        else:
+            for record in self.history_data:
+                row = HistoryRow(record)
+                row.restore_clicked.connect(self.handle_restore)
+                self.list_layout.addWidget(row)
+
+    def handle_restore(self, record):
+        self.request_restore.emit(record)
+        self.accept()
+
+    def clear_list(self):
+        """动态清空列表 UI 并显示占位符"""
+        while self.list_layout.count() > 0:
+            item = self.list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        
+        empty_lbl = QLabel("暂无任何本地检测记录。")
+        empty_lbl.setAlignment(Qt.AlignCenter)
+        empty_lbl.setStyleSheet("color: #9CA3AF; font-size: 13px; margin-top: 50px;")
+        self.list_layout.addWidget(empty_lbl)
+
+    def update_theme(self):
+        t = Theme.COLORS['dark']
+        
+        palette = self.palette()
+        palette.setColor(QPalette.Window, QColor(t['bg_main']))
+        palette.setColor(QPalette.WindowText, QColor(t['text_main']))
+        self.setPalette(palette)
+        
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: {t['bg_main']}; color: {t['text_main']}; }}
+            {Theme.SCROLLBAR_CSS}
+        """)
+        self.scroll.setStyleSheet("QScrollArea { background: transparent; border: none; } QScrollArea > QWidget > QWidget { background: transparent; }")

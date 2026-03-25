@@ -3,6 +3,7 @@ import os
 import math
 import re
 import json
+import datetime
 from PySide6.QtCore import QThread, Signal
 
 # --- 核心修复：防止 PyInstaller --noconsole 模式下 transformers 报错 ---
@@ -39,7 +40,54 @@ def get_resource_path(relative_path):
 
     return external_path
 
-# ---------------------- 本地配置持久化 ----------------------
+# ---------------------- 本地历史记录管理 ----------------------
+def load_history():
+    """读取本地历史记录（最多返回最新的 10 条）"""
+    path = get_save_path("deepveri_history.json")
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def save_history(original_text, total_ai_rate, total_tokens, paragraphs):
+    """将单次成功的检测结果保存进历史记录池中"""
+    history = load_history()
+    
+    # 智能防重：如果当前检测的原文和最近一次历史记录完全一致，则不重复保存
+    if history and history[0].get("original_text") == original_text:
+        return
+        
+    record = {
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "original_text": original_text,
+        "total_ai_rate": total_ai_rate,
+        "total_tokens": total_tokens,
+        "paragraphs": paragraphs
+    }
+    
+    history.insert(0, record)
+    history = history[:10]  # 强制裁剪：永远只保留最近的 10 条记录
+    
+    path = get_save_path("deepveri_history.json")
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"Save history error: {e}")
+
+def clear_all_history():
+    """彻底清除所有历史记录，保护隐私"""
+    path = get_save_path("deepveri_history.json")
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except Exception as e:
+            print(f"Clear history error: {e}")
+
+# ---------------------- 本地配置持久化 (双层架构) ----------------------
 def get_save_path(filename):
     """获取用户配置保存路径（支持打包后环境）"""
     if getattr(sys, 'frozen', False):
@@ -48,11 +96,11 @@ def get_save_path(filename):
         base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, filename)
 
-def load_settings():
-    """从本地读取控制台参数，如果没有则使用默认值"""
-    path = get_save_path("deepveri_settings.json")
+def load_factory_defaults():
+    """加载用户自定义的【全局默认值】"""
+    path = get_save_path("deepveri_factory_defaults.json")
     
-    # 按照你的要求，更新底层初始默认值
+    # 系统最底层的出厂硬编码安全兜底
     default_config = {
         'temperature': 2.0,
         'power_factor': 1.5,
@@ -64,15 +112,39 @@ def load_settings():
     if os.path.exists(path):
         try:
             with open(path, 'r', encoding='utf-8') as f:
-                user_config = json.load(f)
-                default_config.update(user_config)
+                user_defaults = json.load(f)
+                default_config.update(user_defaults)
         except Exception:
             pass
             
     return default_config
 
+def save_factory_defaults(config):
+    """保存用户自定义的【全局默认值】"""
+    path = get_save_path("deepveri_factory_defaults.json")
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"Save factory defaults error: {e}")
+
+def load_settings():
+    """从本地读取当前运行参数，如果没有则继承【全局默认值】"""
+    path = get_save_path("deepveri_settings.json")
+    config = load_factory_defaults()
+    
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                user_config = json.load(f)
+                config.update(user_config)
+        except Exception:
+            pass
+            
+    return config
+
 def save_settings(config):
-    """将参数永久保存到本地 JSON 文件中"""
+    """将参数永久保存到本地作为下一次的运行参数"""
     path = get_save_path("deepveri_settings.json")
     try:
         with open(path, 'w', encoding='utf-8') as f:
@@ -90,7 +162,6 @@ def check_gpu_availability():
         
         if use_cuda:
             name = torch.cuda.get_device_name(0)
-            # 核心修复：彻底移除 [:20] 的强制切断，展示完整显卡型号
             return True, f"NVIDIA GPU ({name})"
         elif use_mps:
             return True, "Apple Metal (MPS加速)"
@@ -248,7 +319,6 @@ class AIGCDetectionThread(QThread):
             if use_cuda:
                 device_str = "cuda"
                 gpu_name = torch.cuda.get_device_name(0)
-                # 核心修复：移除底层的 [:20] 截断限制
                 self.device_signal.emit(f"🚀 显卡加速: {gpu_name}", True)
                 torch_device = torch.device("cuda")
             elif use_mps:
@@ -329,7 +399,13 @@ class AIGCDetectionThread(QThread):
                     is_ignored = para_len < self.MIN_VALID_CHARS
                     weight = 0 if is_ignored else para_len
                     
-                    results.append({"content": para, "ai_rate": ai_rate, "is_ignored": is_ignored})
+                    # --- 核心改动：把当前段落测出来的 token_count 塞进字典一起返回给 UI ---
+                    results.append({
+                        "content": para, 
+                        "ai_rate": ai_rate, 
+                        "is_ignored": is_ignored,
+                        "tokens": token_count
+                    })
                     
                     if not is_ignored:
                         total_weighted_score += (ai_rate * weight)
