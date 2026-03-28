@@ -36,6 +36,11 @@
 
     双击点开软件后，界面左下角会检测模型是否正确加载，也可手动点击刷新重新加载模型，右下角会检测显卡型号，目前只支持英伟达GPU，AMD GPU尚未测试，应该会出问题，不过可以使用CPU的轻量化模式。
 
+## 打个广告，我的另一个降AI率的程序，可以配合使用
+同样完全免费！您需要自己准备API key来调用模型
+
+[![AI检测率降低工具](https://img.shields.io/badge/GitHub-AI%20Detection%20Reduction%20Tool-blue?style=for-the-badge)](https://github.com/christo112233/AI-Detection-Reduction-Tool.git)
+
  ## 📖 文档与教程
 这里为您整理了项目的完整使用教程与开发文档：
 
