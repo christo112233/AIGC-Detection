@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMessageBox, QSplitter, QScrollArea, QCheckBox, QPushButton, QDialog,
     QGridLayout, QGraphicsOpacityEffect
 )
-from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve
+from PySide6.QtCore import Qt, QTimer, QThread, Signal, QPropertyAnimation, QEasingCurve, QObject
 from PySide6.QtGui import QCursor, QFont, QColor, QPalette 
 
 # --- 依赖库安全导入 ---
@@ -35,11 +35,14 @@ from ui_components import (
 )
 from core_engine import AIGCDetectionThread, get_resource_path, check_gpu_availability, load_settings, save_settings, load_history, save_history, clear_all_history
 
+# ================= 跨线程信号桥梁 =================
+class APIMonitor(QObject):
+    """安全地将后台 Flask 线程的心跳传递到主 GUI 线程"""
+    heartbeat = Signal()
+
 # ---------------------- 静默硬件嗅探线程 ----------------------
 class HWScannerThread(QThread):
-    """在软件一打开时，去后台偷偷扫描有没有可用的显卡，防止首次点击控制台时卡顿"""
     finished_scan = Signal(bool, str)
-    
     def run(self):
         has_gpu, msg = check_gpu_availability()
         self.finished_scan.emit(has_gpu, msg)
@@ -51,32 +54,35 @@ class AIGCSentinel(QMainWindow):
         self.setWindowTitle("DeepVeri - AI 生成检测系统") 
         self.resize(1300, 850)
         
-        # 状态变量
         self.is_model_valid = False 
         self.model_path = ""
         self.last_results = []      
         self.detailed_heatmap_win = None 
-        self._is_restoring = False # 用于标记当前是否为恢复历史状态
+        self._is_restoring = False 
         
-        # 从本地 JSON 预载控制台底层参数
         self.engine_config = load_settings()
         self.has_gpu = False
         self.gpu_name = "检测中..."
         self.is_hw_scanned = False 
         
-        # 增量渲染队列管理
         self.render_queue = []
         self.render_timer = QTimer(self)
         self.render_timer.timeout.connect(self._process_render_batch)
         
-        # 强制锁定深色模式
+        # --- API 心跳状态管理 ---
+        self.api_monitor = APIMonitor()
+        self.api_monitor.heartbeat.connect(self._on_api_heartbeat)
+        
+        self.api_timeout_timer = QTimer(self)
+        self.api_timeout_timer.setInterval(5000) # 5秒没收到心跳就判定断开
+        self.api_timeout_timer.timeout.connect(self._on_api_timeout)
+        
         Theme.CURRENT_MODE = 'dark'
         
         self.init_ui()           
         self.update_theme()      
-        self.check_model_status()
+        self.check_model_status() # 这里面会自动拉起 API 微服务
         
-        # 开机静默派发硬件扫描
         self.hw_scanner = HWScannerThread()
         self.hw_scanner.finished_scan.connect(self._on_hw_scanned)
         self.hw_scanner.start()
@@ -85,13 +91,10 @@ class AIGCSentinel(QMainWindow):
         self.is_hw_scanned = True
         self.has_gpu = has_gpu
         self.gpu_name = msg
-        
-        # 硬件嗅探就绪后的贴心提示
         self.status_text.setText(f"✅ 硬件嗅探完毕: {msg}。控制台已就绪！")
         self.status_text.setStyleSheet(f"color: {Theme.ACCENT_GREEN.name()}; font-weight: bold; padding: 0 4px;")
 
     def init_ui(self):
-        """初始化 UI 布局"""
         central = QWidget()
         central.setObjectName("centralWidget") 
         self.setCentralWidget(central)
@@ -99,7 +102,6 @@ class AIGCSentinel(QMainWindow):
         layout.setContentsMargins(20, 20, 20, 15) 
         layout.setSpacing(15) 
 
-        # ------------------ 顶部 Header ------------------
         header = QHBoxLayout()
         title_box = QVBoxLayout()
         
@@ -150,7 +152,6 @@ class AIGCSentinel(QMainWindow):
         header.addWidget(self.btn_detect)
         layout.addLayout(header)
 
-        # ------------------ 中间核心区域 ------------------
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(20)
         
@@ -177,11 +178,9 @@ class AIGCSentinel(QMainWindow):
         out_outer_layout = QHBoxLayout(self.card_output)
         out_outer_layout.setContentsMargins(0, 10, 5, 10)
         
-        # --- 核心改动：搭建 QGridLayout 层叠布局 ---
         self.right_stack_layout = QGridLayout()
         self.right_stack_layout.setContentsMargins(0, 0, 0, 0)
         
-        # 1. 结果内容层
         self.content_container = QWidget()
         res_main_layout = QVBoxLayout(self.content_container)
         res_main_layout.setContentsMargins(0, 0, 0, 0)
@@ -219,11 +218,9 @@ class AIGCSentinel(QMainWindow):
         
         self.right_stack_layout.addWidget(self.content_container, 0, 0)
         
-        # 2. 空状态屏层
         self.empty_container = EmptyStateWidget()
         self.right_stack_layout.addWidget(self.empty_container, 0, 0)
         
-        # 3. 初始化面板可见性
         self.content_container.hide()
         self.empty_container.show()
         
@@ -258,6 +255,24 @@ class AIGCSentinel(QMainWindow):
         sb_layout.addWidget(self.btn_refresh)
         sb_layout.addStretch()
         
+       # --- 【核心修改】：Vercel 风格极简指示灯 (初始为离线状态) ---
+        self.api_status_lbl = QLabel("<span style='font-size: 16px; vertical-align: middle;'>•</span> 节点离线")
+        self.offline_api_css = "color: #EF4444; font-weight: bold; font-size: 11px; margin-right: 15px;" 
+        self.api_status_lbl.setStyleSheet(self.offline_api_css)
+        
+        # --- 【核心新增】：为指示灯创建专属的透明度特效和脉冲动画 ---
+        self.api_pulse_eff = QGraphicsOpacityEffect(self.api_status_lbl)
+        self.api_status_lbl.setGraphicsEffect(self.api_pulse_eff)
+        
+        self.api_pulse_anim = QPropertyAnimation(self.api_pulse_eff, b"opacity")
+        self.api_pulse_anim.setDuration(400) # 闪烁总耗时 0.4 秒
+        self.api_pulse_anim.setStartValue(1.0)
+        self.api_pulse_anim.setKeyValueAt(0.4, 0.4) # 中间变暗，模拟心跳
+        self.api_pulse_anim.setEndValue(1.0)
+        self.api_pulse_anim.setEasingCurve(QEasingCurve.InOutQuad)
+        
+        sb_layout.addWidget(self.api_status_lbl)
+        
         self.label_device = QLabel("")
         self.label_device.setStyleSheet("color: #666; font-size: 11px; margin-right: 10px;")
         sb_layout.addWidget(self.label_device)
@@ -266,6 +281,31 @@ class AIGCSentinel(QMainWindow):
         self.progress_bar.setFixedWidth(300)
         sb_layout.addWidget(self.progress_bar)
         layout.addWidget(status_bar)
+
+    # ------------------ API 节点交互逻辑 ------------------
+    def _on_api_heartbeat(self):
+        """收到外界请求，变为极简绿点，并触发心跳闪烁动效"""
+        active_css = "color: #10B981; font-weight: bold; font-size: 11px; margin-right: 15px;"
+        
+        # 只有在状态真正改变时才更新 UI，减少重绘开销
+        if self.api_status_lbl.text() != "<span style='font-size: 16px; vertical-align: middle;'>•</span> 节点活跃":
+            self.api_status_lbl.setText("<span style='font-size: 16px; vertical-align: middle;'>•</span> 节点活跃")
+            self.api_status_lbl.setStyleSheet(active_css)
+        
+        # 触发脉冲闪烁动画 (如果上一次没播完，强行重播)
+        if self.api_pulse_anim.state() == QPropertyAnimation.Running:
+            self.api_pulse_anim.stop()
+        self.api_pulse_anim.start()
+        
+        self.api_timeout_timer.start()
+
+    def _on_api_timeout(self):
+        """超过倒计时没收到请求，瞬间变回离线红点"""
+        self.api_status_lbl.setText("<span style='font-size: 16px; vertical-align: middle;'>•</span> 节点离线")
+        self.api_status_lbl.setStyleSheet(self.offline_api_css)
+        
+        self.api_timeout_timer.stop()
+        self.api_pulse_eff.setOpacity(1.0) # 确保透明度恢复正常
 
     # ------------------ 历史记录面板交互 ------------------
     def open_history(self):
@@ -284,48 +324,35 @@ class AIGCSentinel(QMainWindow):
         )
         if reply == QMessageBox.Yes:
             clear_all_history()
-            
-            # 同步刷新，瞬间清空历史界面的内容
             if hasattr(self, 'history_dlg') and self.history_dlg:
                 self.history_dlg.clear_list()
-                
             QMessageBox.information(self, "成功", "历史记录已彻底清空。")
 
     def restore_from_history(self, record):
-        """时光倒流：全盘复原历史记录界面"""
         if self.detailed_heatmap_win:
             self.detailed_heatmap_win.close()
             
-        # --- 核心修复：传入 show_empty=False，防止清空时触发退回星星面板的动画，避免动画队列冲突死锁 ---
         self.clear_content(show_empty=False) 
-        
-        # --- 触发面板切换动效 ---
         self.show_content_panel()
         
-        # 1. 恢复输入区
         text = record.get("original_text", "")
         html_content = f"<div style='line-height: 1.6;'>{html.escape(text).replace(chr(10), '<br>')}</div>"
         self.input_edit.setHtml(html_content)
         
-        # 2. 组装虚拟的结果数据
         res = {
             "total_ai_rate": record.get("total_ai_rate", 0),
             "total_tokens": record.get("total_tokens", 0),
             "paragraphs": record.get("paragraphs", [])
         }
         
-        # 3. 通知 process_results 这是一个恢复动作，不需要再次被存入历史记录
         self._is_restoring = True
         self.process_results(res)
         self._is_restoring = False
         
-        # 4. 界面反馈
         self.status_text.setText(f"✅ 已成功恢复历史记录：{record.get('timestamp')}")
         self.status_text.setStyleSheet(f"color: {Theme.ACCENT_GREEN.name()}; font-weight: bold; padding: 0 4px;")
 
-    # ------------------ 控制台唤醒交互 ------------------
     def open_console(self):
-        """打开控制台，具有硬件嗅探保护"""
         if not self.is_hw_scanned:
             QMessageBox.information(self, "稍等", "系统正在初始化并静默扫描底层显卡硬件池，请等待几秒钟再打开控制台。")
             return
@@ -338,7 +365,7 @@ class AIGCSentinel(QMainWindow):
         )
         
         if dlg.exec() == QDialog.Accepted:
-            self.engine_config = dlg.config
+            self.engine_config.update(dlg.config)
             save_settings(self.engine_config) 
             
             mode = "纯 CPU 算力接管" if self.engine_config['force_cpu'] else "智能硬件加速"
@@ -354,7 +381,6 @@ class AIGCSentinel(QMainWindow):
             else:
                 self.update_device_ui(f"🚀 预载：准备调用 {self.gpu_name}", True)
 
-    # ------------------ 模型调度逻辑 ------------------
     def manual_refresh_model(self):
         self.btn_refresh.setEnabled(False) 
         bg = Theme.get('bg_main')
@@ -391,6 +417,20 @@ class AIGCSentinel(QMainWindow):
                 self.status_icon.setStyleSheet(f"color: {Theme.ACCENT_GREEN.name()}; font-size: 14px;")
                 self.status_text.setText("本地引擎已就绪")
                 self.status_text.setStyleSheet(f"color: {Theme.ACCENT_GREEN.name()}; background-color: {bg}; font-weight: bold; padding: 0 4px;")
+                
+                # --- 核心改动：在确信模型可用后，把跨线程回调挂载给 API 微服务启动函数 ---
+                if not hasattr(self, '_api_started'):
+                    try:
+                        from api_server import start_api_server
+                        start_api_server(
+                            self.model_path, 
+                            self.engine_config, 
+                            port=5005, 
+                            notify_callback=self.api_monitor.heartbeat.emit  # 将 Signal 指针传给 Flask 线程
+                        )
+                        self._api_started = True
+                    except Exception as e:
+                        print(f"微服务静默启动失败: {e}")
             else:
                 self.set_model_invalid("缺失核心权重文件")
         except Exception as e:
@@ -399,7 +439,6 @@ class AIGCSentinel(QMainWindow):
     def set_model_invalid(self, reason):
         self.is_model_valid = False
         bg = Theme.get('bg_main')
-        
         self.status_icon.setStyleSheet(f"color: {Theme.ACCENT_RED.name()}; font-size: 14px;")
         self.status_text.setText(f"⚠️ 无法检测: {reason}")
         self.status_text.setStyleSheet(f"color: {Theme.ACCENT_RED.name()}; background-color: {bg}; font-weight: bold; padding: 0 4px;")
@@ -414,7 +453,6 @@ class AIGCSentinel(QMainWindow):
     def show_detailed_heatmap(self):
         if not hasattr(self, 'last_results') or not self.last_results:
             return
-            
         if self.detailed_heatmap_win and self.detailed_heatmap_win.isVisible():
             self.detailed_heatmap_win.activateWindow()
         else:
@@ -422,7 +460,6 @@ class AIGCSentinel(QMainWindow):
             self.detailed_heatmap_win.request_scroll.connect(self.scroll_to_section)
             self.detailed_heatmap_win.show()
 
-    # ------------------ 业务核心：安全检测运行与终止 ------------------
     def run_detection(self):
         if hasattr(self, 'work_thread') and self.work_thread.isRunning():
             self.work_thread.stop()
@@ -443,8 +480,6 @@ class AIGCSentinel(QMainWindow):
             
         self.btn_detect.setVariant("danger")
         self.btn_detect.setText("⏹️ 终止检测")
-        
-        # --- 触发面板切换 ---
         self.show_content_panel()
         
         self.render_timer.stop()
@@ -479,7 +514,6 @@ class AIGCSentinel(QMainWindow):
         
         self.last_results = res.get("paragraphs", [])
         
-        # --- 核心新增：检测完成后静默写入历史记录 ---
         if not self._is_restoring:
             save_history(
                 original_text=self.input_edit.toPlainText().strip(),
@@ -523,7 +557,6 @@ class AIGCSentinel(QMainWindow):
             idx, p = self.render_queue.pop(0)
             use_anim = (idx < 10)
             
-            # --- 核心改动：将 tokens 传导至 UI 组件 ---
             block = ResultBlock(
                 index=idx, 
                 content=p["content"], 
@@ -544,7 +577,6 @@ class AIGCSentinel(QMainWindow):
         self.result_container.setUpdatesEnabled(True)
         self.result_container.update()
 
-    # ------------------ UI 联动功能 ------------------
     def on_block_expanded(self, expanded_index):
         for i in range(self.result_layout.count()):
             item = self.result_layout.itemAt(i)
@@ -583,15 +615,14 @@ class AIGCSentinel(QMainWindow):
                 self.chk_only_high_risk.setChecked(False) 
                 QApplication.processEvents() 
                 
-            self.result_scroll.ensureWidgetVisible(target) 
-            
             if not target.is_expanded:
                 target.toggle_expand() 
                 
+            QApplication.processEvents() 
+            self.result_scroll.verticalScrollBar().setValue(target.pos().y())
+            self.result_scroll.horizontalScrollBar().setValue(0)
             self.highlight_source_text(target.content) 
 
-    # ------------------ 文档处理与基础功能 ------------------
-    # --- 核心修复：利用 *args 吸收点击信号，并增加 show_empty 控制参数 ---
     def clear_content(self, *args, show_empty=True):
         self.render_timer.stop() 
         self.render_queue = []
@@ -599,7 +630,6 @@ class AIGCSentinel(QMainWindow):
         self.lbl_char_count.setText("字数: 0") 
         self.last_results = []
         
-        # --- 触发面板切换动效 (切回空状态) ---
         if show_empty:
             self.show_empty_panel()
         
@@ -617,15 +647,11 @@ class AIGCSentinel(QMainWindow):
         if self.detailed_heatmap_win:
             self.detailed_heatmap_win.close() 
 
-    # ================= UI 级高级动效调度 =================
     def show_content_panel(self):
-        """丝滑淡出空状态，展现数据看板 (通过剥离内层特效完美规避死锁)"""
         if not self.content_container.isVisible():
-            # 1. 彻底剥离内部呼吸灯特效，防止嵌套死锁
             if hasattr(self.empty_container, 'pause_breathing'):
                 self.empty_container.pause_breathing()
 
-            # 2. 赋予容器临时透明度特效
             self.empty_eff = QGraphicsOpacityEffect()
             self.empty_container.setGraphicsEffect(self.empty_eff)
 
@@ -635,7 +661,6 @@ class AIGCSentinel(QMainWindow):
 
             self.content_container.show()
 
-            # 3. 交叉淡入淡出动画
             self.fade_out_empty = QPropertyAnimation(self.empty_eff, b"opacity")
             self.fade_out_empty.setDuration(300)
             self.fade_out_empty.setStartValue(1.0)
@@ -650,10 +675,10 @@ class AIGCSentinel(QMainWindow):
 
             def _on_fade_out():
                 self.empty_container.hide()
-                self.empty_container.setGraphicsEffect(None) # 销毁外层特效以释放内存
+                self.empty_container.setGraphicsEffect(None) 
 
             def _on_fade_in():
-                self.content_container.setGraphicsEffect(None) # 销毁外层特效以释放内存
+                self.content_container.setGraphicsEffect(None) 
 
             self.fade_out_empty.finished.connect(_on_fade_out)
             self.fade_in_content.finished.connect(_on_fade_in)
@@ -662,9 +687,7 @@ class AIGCSentinel(QMainWindow):
             self.fade_in_content.start()
 
     def show_empty_panel(self):
-        """丝滑淡出数据看板，返回空状态"""
         if self.content_container.isVisible():
-            # 1. 赋予临时特效
             self.content_eff = QGraphicsOpacityEffect()
             self.content_container.setGraphicsEffect(self.content_eff)
 
@@ -674,7 +697,6 @@ class AIGCSentinel(QMainWindow):
 
             self.empty_container.show()
 
-            # 2. 交叉动画
             self.fade_out_content = QPropertyAnimation(self.content_eff, b"opacity")
             self.fade_out_content.setDuration(300)
             self.fade_out_content.setStartValue(1.0)
@@ -693,7 +715,6 @@ class AIGCSentinel(QMainWindow):
 
             def _on_fade_in():
                 self.empty_container.setGraphicsEffect(None)
-                # 动画结束后，把被剥离的呼吸灯还给星星！
                 if hasattr(self.empty_container, 'resume_breathing'):
                     self.empty_container.resume_breathing()
 
@@ -859,6 +880,7 @@ if __name__ == "__main__":
     font = QFont("Microsoft YaHei", 10)
     font.setStyleStrategy(QFont.PreferAntialias)
     app.setFont(font)
+    
     window = AIGCSentinel()
     window.show()
     sys.exit(app.exec())
