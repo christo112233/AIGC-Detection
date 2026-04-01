@@ -12,7 +12,7 @@ TraceLess作为我同步开发的另一款专注于AI文本改写降重的工具
 在此推荐各位用户优先使用TraceLess的网页面板进行操作：相较于纯Python环境，HTML环境在UI交互设计与体验优化上具备显著优势，可为用户提供更流畅、更便捷的操作体验。
 
 ### 传送门，TraceLess项目入口
-同样完全免费！您需要自己准备API key来调用模型
+同样完全免费！您需要自己准备API key来调用模型 **(其实软件已经可以正常使用了，但是为了追求极致的完美，需要再修一修bug，大家莫急，我保证6月份毕业季之前重新开放该仓库)**
 
 [![AI检测率降低工具](https://img.shields.io/badge/GitHub-AI%20Detection%20Reduction%20Tool-blue?style=for-the-badge)](https://github.com/christo112233/AI-Detection-Reduction-Tool.git)
 
