@@ -171,12 +171,26 @@ def check_gpu_availability():
     except Exception as e:
         return False, "Torch 环境异常，无法检测硬件"
 
+def validate_gpu_operation():
+    """用一个小 tensor 做 CUDA 运算，验证显卡真的能干活"""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return False, "CUDA 不可用"
+        a = torch.randn(2, 3, device="cuda")
+        b = torch.randn(2, 3, device="cuda")
+        (a + b).cpu()  # 强制同步，捕捉异步错误
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
 # ---------------------- 核心检测线程 ----------------------
 class AIGCDetectionThread(QThread):
     progress_signal = Signal(int)
     result_signal = Signal(dict)
     status_signal = Signal(str)
     device_signal = Signal(str, bool)
+    segment_error_signal = Signal(str)
 
     def __init__(self, text, model_path, config=None):
         super().__init__()
@@ -321,6 +335,14 @@ class AIGCDetectionThread(QThread):
                 gpu_name = torch.cuda.get_device_name(0)
                 self.device_signal.emit(f"🚀 显卡加速: {gpu_name}", True)
                 torch_device = torch.device("cuda")
+
+                # GPU 烟雾测试：用小 tensor 验证显卡真的能执行运算
+                gpu_ok, gpu_err = validate_gpu_operation()
+                if not gpu_ok:
+                    self.device_signal.emit(
+                        f"⚠️ GPU 初始化异常，已自动回退 CPU: {gpu_err[:80]}", False)
+                    torch_device = torch.device("cpu")
+                    use_cuda = False
             elif use_mps:
                 device_str = "mps"
                 self.device_signal.emit(f"⚡ Mac GPU 加速", True)
@@ -331,7 +353,7 @@ class AIGCDetectionThread(QThread):
                 extra_info = " [错误: 安装了CPU版Torch]" if "+cpu" in version else (" [用户强制/无GPU]" if not use_cuda else "")
                 self.device_signal.emit(f"🐢 CPU 运算模式{extra_info}", False)
                 torch_device = torch.device("cpu")
-            
+
             self.progress_signal.emit(10)
             self.status_signal.emit("加载本地权重 (config, bin, vocab)...")
             
@@ -361,7 +383,9 @@ class AIGCDetectionThread(QThread):
             results = []
             total_weighted_score = 0
             total_valid_weight = 0
-            total_tokens = 0 
+            total_tokens = 0
+            failed_segments = 0
+            total_segments = len(paragraphs)
 
             for idx, para in enumerate(paragraphs):
                 # 检查用户是否按下了终止按钮
@@ -370,51 +394,70 @@ class AIGCDetectionThread(QThread):
                     break
 
                 self.status_signal.emit(f"深度指纹分析中... {idx+1}/{len(paragraphs)}")
-                
+
                 try:
                     inputs = tokenizer(para, return_tensors="pt", truncation=True, max_length=512)
                     token_count = inputs["input_ids"].shape[1]
                     total_tokens += token_count
-                    
+
                     inputs = {k: v.to(torch_device) for k, v in inputs.items()}
                     with torch.no_grad():
                         outputs = model(**inputs)
                         logits = outputs.logits
-                        
+
                         # 应用温度系数
                         scaled_logits = logits / self.TEMPERATURE
                         probs = F.softmax(scaled_logits, dim=-1)
                         raw_ai_score = probs[0][ai_label_id].item()
-                        
+
                         human_bonus = self.calculate_human_features(para)
                         adjusted_score = max(0.0, raw_ai_score - human_bonus)
-                        
+
                         # 应用指数惩罚因子
                         final_ai_score = math.pow(adjusted_score, self.POWER_FACTOR)
                         ai_rate = round(final_ai_score * 100, 2)
-                    
+
                     para_len = self.get_token_length(para)
-                    
+
                     # 判断极短句忽略
                     is_ignored = para_len < self.MIN_VALID_CHARS
                     weight = 0 if is_ignored else para_len
-                    
-                    # --- 核心改动：把当前段落测出来的 token_count 塞进字典一起返回给 UI ---
+
                     results.append({
-                        "content": para, 
-                        "ai_rate": ai_rate, 
+                        "content": para,
+                        "ai_rate": ai_rate,
                         "is_ignored": is_ignored,
                         "tokens": token_count
                     })
-                    
+
                     if not is_ignored:
                         total_weighted_score += (ai_rate * weight)
                         total_valid_weight += weight
-                        
+
                 except Exception as e:
-                    print(f"Segment Error: {e}")
-                
+                    failed_segments += 1
+                    self.segment_error_signal.emit(f"段落推理异常: {str(e)[:100]}")
+                    results.append({
+                        "content": para,
+                        "ai_rate": 0,
+                        "is_ignored": True,
+                        "tokens": 0,
+                        "inference_error": True
+                    })
+
                 self.progress_signal.emit(30 + int(((idx + 1) / len(paragraphs)) * 65))
+
+            # 全部段落失败时，弹出明确错误提示
+            if failed_segments >= total_segments:
+                self.result_signal.emit({
+                    "error": f"所有 {total_segments} 个段落推理均失败。\n"
+                             f"请在控制台中启用「强制使用 CPU」后重试，或检查 CUDA 环境。"
+                })
+                return
+
+            if failed_segments > 0:
+                self.status_signal.emit(
+                    f"⚠️ {failed_segments}/{total_segments} 个段落推理失败，结果可能不完整")
 
             # 统一计算总分并返回界面
             avg = round(total_weighted_score / total_valid_weight, 2) if total_valid_weight > 0 else 0

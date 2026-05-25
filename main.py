@@ -365,17 +365,26 @@ class AIGCSentinel(QMainWindow):
         )
         
         if dlg.exec() == QDialog.Accepted:
+            old_force_cpu = self.engine_config.get('force_cpu', False)
             self.engine_config.update(dlg.config)
-            save_settings(self.engine_config) 
-            
+            save_settings(self.engine_config)
+
+            # 如果 force_cpu 切换了，重启 API Worker 使其用新设备
+            if self.engine_config.get('force_cpu', False) != old_force_cpu:
+                try:
+                    from api_server import restart_api_worker
+                    restart_api_worker()
+                except Exception:
+                    pass
+
             mode = "纯 CPU 算力接管" if self.engine_config['force_cpu'] else "智能硬件加速"
             QMessageBox.information(
-                self, 
-                "底层引擎参数已更新", 
+                self,
+                "底层引擎参数已更新",
                 f"新参数（切分阈值 {self.engine_config['max_chunk_size']} 等）已永久保存。\n"
                 f"将在下一次「开始深度检测」时以 {mode} 生效！"
             )
-            
+
             if self.engine_config['force_cpu']:
                 self.update_device_ui("🐢 预载：用户强制切断硬件加速 (CPU)", False)
             else:
@@ -498,6 +507,8 @@ class AIGCSentinel(QMainWindow):
         self.work_thread.progress_signal.connect(self.progress_bar.setValue)
         self.work_thread.result_signal.connect(self.process_results)
         self.work_thread.device_signal.connect(self.update_device_ui)
+        self.work_thread.segment_error_signal.connect(
+            lambda msg: self.status_text.setText(f"  {msg}"))
         self.work_thread.finished.connect(self._on_thread_finished)
         self.work_thread.start()
 

@@ -94,6 +94,19 @@ def smart_split_paragraph(text, max_chunk_size):
         result.append(current_chunk)
     return result
 
+def validate_gpu_operation():
+    """用一个小 tensor 做 CUDA 运算，验证显卡真的能干活"""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return False, "CUDA 不可用"
+        a = torch.randn(2, 3, device="cuda")
+        b = torch.randn(2, 3, device="cuda")
+        (a + b).cpu()  # 强制同步，捕捉异步错误
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
 # ================= 线程安全的模型工作者 =================
 class APIModelWorker(threading.Thread):
     def __init__(self, model_path, config, task_queue):
@@ -105,20 +118,27 @@ class APIModelWorker(threading.Thread):
     def run(self):
         use_cuda = torch.cuda.is_available()
         use_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-        
+
         if self.config.get('force_cpu', False):
-            device = torch.device("cpu")
+            preferred_device = torch.device("cpu")
         elif use_cuda:
-            device = torch.device("cuda")
+            # GPU 烟雾测试：用小 tensor 验证显卡真的能执行运算
+            gpu_ok, gpu_err = validate_gpu_operation()
+            if gpu_ok:
+                preferred_device = torch.device("cuda")
+                print("⚡ API 微服务: CUDA GPU 已就绪")
+            else:
+                preferred_device = torch.device("cpu")
+                print(f"⚠️ API 微服务: GPU 烟雾测试失败 ({gpu_err[:80]})，回退 CPU")
         elif use_mps:
-            device = torch.device("mps")
+            preferred_device = torch.device("mps")
         else:
-            device = torch.device("cpu")
+            preferred_device = torch.device("cpu")
 
         try:
             tokenizer = AutoTokenizer.from_pretrained(self.model_path, local_files_only=True)
             model = AutoModelForSequenceClassification.from_pretrained(self.model_path, local_files_only=True)
-            model.to(device)
+            model.to(preferred_device)
             model.eval()
         except Exception as e:
             print(f"API 微服务加载模型异常: {e}")
@@ -131,20 +151,29 @@ class APIModelWorker(threading.Thread):
                     ai_label_id = int(idx)
                     break
 
-        print("⚡ API 微服务推理引擎已就绪，正在监听请求...")
+        current_device = preferred_device
+        print(f"⚡ API 微服务推理引擎已就绪 (设备: {current_device.type})，正在监听请求...")
 
         while True:
             task = self.task_queue.get()
             if task is None: break
-            
+
+            # 每轮动态检查 force_cpu 是否被用户切换
+            force_cpu = self.config.get('force_cpu', False)
+            should_device = torch.device("cpu") if force_cpu else preferred_device
+            if should_device.type != current_device.type:
+                model.to(should_device)
+                current_device = should_device
+                print(f"⚡ API 微服务: 设备已切换至 {current_device.type}")
+
             text = task['text']
             resp_queue = task['resp_queue']
-            
+
             try:
                 raw_paragraphs = [p for p in text.split("\n") if p.strip()]
                 paragraphs = []
                 max_chunk = self.config.get('max_chunk_size', 700)
-                
+
                 for p in raw_paragraphs:
                     paragraphs.extend(smart_split_paragraph(p, max_chunk))
 
@@ -160,8 +189,8 @@ class APIModelWorker(threading.Thread):
 
                 for para in paragraphs:
                     inputs = tokenizer(para, return_tensors="pt", truncation=True, max_length=512)
-                    inputs = {k: v.to(device) for k, v in inputs.items()}
-                    
+                    inputs = {k: v.to(current_device) for k, v in inputs.items()}
+
                     with torch.no_grad():
                         outputs = model(**inputs)
                         scaled_logits = outputs.logits / temp
@@ -189,11 +218,13 @@ class APIModelWorker(threading.Thread):
                     resp_queue.put({"ai_ratio": 0.0, "status": "too_short"})
 
             except Exception as e:
-                print(f"API 微服务推理出错: {e}")
                 resp_queue.put({"ai_ratio": 0.0, "status": f"error: {str(e)}"})
 
 # ================= Web 服务装载层 =================
 _notify_callback = None  # 用于向主界面发送心跳信号的回调钩子
+_worker = None           # 当前运行的 API Worker 线程
+_worker_model_path = None
+_worker_config = None
 
 if FLASK_AVAILABLE:
     app = Flask(__name__)
@@ -233,19 +264,37 @@ def start_api_server(model_path, config, port=5005, notify_callback=None):
     在 GUI 启动前调用的挂载函数
     :param notify_callback: 必须是一个无参函数 (通常是 PySide6 的 Signal.emit)
     """
+    global _notify_callback, _worker, _worker_model_path, _worker_config
+
     if not FLASK_AVAILABLE:
         print("❌ 未检测到 Flask，API 微服务挂载取消。(请在终端运行 pip install flask)")
         return
 
-    global _notify_callback
     _notify_callback = notify_callback
+    _worker_model_path = model_path
+    _worker_config = config
 
-    worker = APIModelWorker(model_path, config, _task_queue)
-    worker.start()
+    _worker = APIModelWorker(model_path, config, _task_queue)
+    _worker.start()
 
     threading.Thread(
         target=lambda: app.run(host='127.0.0.1', port=port, use_reloader=False, debug=False),
         daemon=True
     ).start()
-    
+
     print(f"🌐 节点联动 API 已于后台静默暴露: http://127.0.0.1:{port}/api/check")
+
+
+def restart_api_worker():
+    """停止旧 Worker 并启动新的（force_cpu 切换后调用）"""
+    global _worker, _worker_model_path, _worker_config
+
+    if _worker is None or _worker_model_path is None:
+        return
+
+    _task_queue.put(None)  # 发送停止信号给旧 Worker
+    _worker.join(timeout=5)
+
+    _worker = APIModelWorker(_worker_model_path, _worker_config, _task_queue)
+    _worker.start()
+    print("⚡ API 微服务: Worker 已用新配置重启")

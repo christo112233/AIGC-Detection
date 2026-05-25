@@ -769,6 +769,7 @@ class DragTextEdit(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
         self.setPlaceholderText("在此处粘贴文本或拖入文件...")
         self._glow_strength = 0.0
         
@@ -793,13 +794,13 @@ class DragTextEdit(QTextEdit):
             super().insertFromMimeData(src)
 
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls():
-            e.accept()
+        if self._has_file_url(e.mimeData()):
+            e.acceptProposedAction()
             self.anim_glow.stop()
             self.anim_glow.setEndValue(1.0)
             self.anim_glow.start()
         else:
-            e.ignore()
+            super().dragEnterEvent(e)
 
     def dragLeaveEvent(self, e):
         self.anim_glow.stop()
@@ -807,21 +808,38 @@ class DragTextEdit(QTextEdit):
         self.anim_glow.start()
         super().dragLeaveEvent(e)
 
+    def dragMoveEvent(self, e):
+        if self._has_file_url(e.mimeData()):
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
     def dropEvent(self, e):
         self.anim_glow.stop()
         self.anim_glow.setEndValue(0.0)
         self.anim_glow.start()
-        
-        urls = e.mimeData().urls()
-        if urls:
-            p = urls[0].toLocalFile()
-            if os.path.splitext(p)[1].lower() in ['.txt', '.docx', '.pdf']:
-                self.file_dropped.emit(p)
-                e.acceptProposedAction()
-            else:
-                e.ignore()
+
+        path = self._extract_file_path(e.mimeData())
+        if path and os.path.splitext(path)[1].lower() in ['.txt', '.docx', '.pdf']:
+            e.acceptProposedAction()
+            self.file_dropped.emit(path)
         else:
-            e.ignore()
+            super().dropEvent(e)
+
+    def _has_file_url(self, mime):
+        """检查 mime 数据中是否包含可拖入的文件"""
+        if mime.hasUrls():
+            for url in mime.urls():
+                p = url.toLocalFile()
+                if os.path.splitext(p)[1].lower() in ['.txt', '.docx', '.pdf']:
+                    return True
+        return False
+
+    def _extract_file_path(self, mime):
+        """从 mime 数据中提取文件路径"""
+        if mime.hasUrls():
+            return mime.urls()[0].toLocalFile()
+        return None
 
     def paintEvent(self, event):
         super().paintEvent(event)
