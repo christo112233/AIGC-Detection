@@ -172,17 +172,65 @@ def check_gpu_availability():
         return False, "Torch 环境异常，无法检测硬件"
 
 def validate_gpu_operation():
-    """用一个小 tensor 做 CUDA 运算，验证显卡真的能干活"""
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            return False, "CUDA 不可用"
-        a = torch.randn(2, 3, device="cuda")
-        b = torch.randn(2, 3, device="cuda")
-        (a + b).cpu()  # 强制同步，捕捉异步错误
-        return True, ""
-    except Exception as e:
-        return False, str(e)
+    """三步唤醒 + 架构兼容性检测"""
+    import torch
+    import time
+
+    if not torch.cuda.is_available():
+        return False, "CUDA 不可用"
+
+    # 获取显卡信息
+    props = torch.cuda.get_device_properties(0)
+    gpu_name = props.name
+    gpu_cc = f"{props.major}.{props.minor}"
+
+    # 检查 PyTorch 编译的架构是否包含这块显卡
+    torch_arches = []
+    if hasattr(torch.cuda, 'get_arch_list'):
+        torch_arches = torch.cuda.get_arch_list()
+
+    # 构建架构字符串用于匹配：sm_100 对应 major=10, sm_120 对应 major=12
+    # get_arch_list 返回 ['sm_50', 'sm_60', ... 'sm_90', 'sm_90a']
+    arch_str = f"sm_{props.major}{props.minor}"
+    arch_supported = any(arch_str in a for a in torch_arches)
+
+    last_err = ""
+    delays = [0, 1, 3, 5]
+
+    for i, d in enumerate(delays):
+        try:
+            if i > 0:
+                time.sleep(d)
+                torch.cuda.init()
+
+            torch.cuda.set_device(0)
+            stream = torch.cuda.Stream()
+            with torch.cuda.stream(stream):
+                a = torch.randn(100, 100, device="cuda")
+                b = torch.randn(100, 100, device="cuda")
+                c = torch.mm(a, b)
+            torch.cuda.synchronize()
+            return True, ""
+        except Exception as e:
+            last_err = str(e)
+
+    # 区分错误类型
+    if "no kernel image" in last_err.lower() and not arch_supported:
+        return False, (
+            f"显卡 {gpu_name} (算力 {gpu_cc}) 不被当前 PyTorch 版本支持。\n"
+            f"当前 PyTorch: {torch.__version__}，支持算力: {torch_arches}\n"
+            f"请升级 PyTorch: pip install torch==2.6.0+cu126 "
+            f"--index-url https://download.pytorch.org/whl/cu126"
+        )
+    elif "no kernel image" in last_err.lower():
+        return False, (
+            f"显卡 {gpu_name} (算力 {gpu_cc}) kernel image 缺失。\n"
+            f"当前 PyTorch 编译架构: {torch_arches}\n"
+            f"尝试升级 PyTorch: pip install torch==2.6.0+cu126 "
+            f"--index-url https://download.pytorch.org/whl/cu126"
+        )
+
+    return False, f"唤醒失败(重试{len(delays)}次): {last_err}"
 
 # ---------------------- 核心检测线程 ----------------------
 class AIGCDetectionThread(QThread):
@@ -340,7 +388,7 @@ class AIGCDetectionThread(QThread):
                 gpu_ok, gpu_err = validate_gpu_operation()
                 if not gpu_ok:
                     self.device_signal.emit(
-                        f"⚠️ GPU 初始化异常，已自动回退 CPU: {gpu_err[:80]}", False)
+                        f"⚠️ GPU 初始化异常，已自动回退 CPU: {gpu_err}", False)
                     torch_device = torch.device("cpu")
                     use_cuda = False
             elif use_mps:

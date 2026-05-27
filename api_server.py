@@ -95,17 +95,60 @@ def smart_split_paragraph(text, max_chunk_size):
     return result
 
 def validate_gpu_operation():
-    """用一个小 tensor 做 CUDA 运算，验证显卡真的能干活"""
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            return False, "CUDA 不可用"
-        a = torch.randn(2, 3, device="cuda")
-        b = torch.randn(2, 3, device="cuda")
-        (a + b).cpu()  # 强制同步，捕捉异步错误
-        return True, ""
-    except Exception as e:
-        return False, str(e)
+    """三步唤醒 + 架构兼容性检测"""
+    import torch
+    import time
+
+    if not torch.cuda.is_available():
+        return False, "CUDA 不可用"
+
+    props = torch.cuda.get_device_properties(0)
+    gpu_name = props.name
+    gpu_cc = f"{props.major}.{props.minor}"
+
+    torch_arches = []
+    if hasattr(torch.cuda, 'get_arch_list'):
+        torch_arches = torch.cuda.get_arch_list()
+
+    arch_str = f"sm_{props.major}{props.minor}"
+    arch_supported = any(arch_str in a for a in torch_arches)
+
+    last_err = ""
+    delays = [0, 1, 3, 5]
+
+    for i, d in enumerate(delays):
+        try:
+            if i > 0:
+                time.sleep(d)
+                torch.cuda.init()
+
+            torch.cuda.set_device(0)
+            stream = torch.cuda.Stream()
+            with torch.cuda.stream(stream):
+                a = torch.randn(100, 100, device="cuda")
+                b = torch.randn(100, 100, device="cuda")
+                c = torch.mm(a, b)
+            torch.cuda.synchronize()
+            return True, ""
+        except Exception as e:
+            last_err = str(e)
+
+    if "no kernel image" in last_err.lower() and not arch_supported:
+        return False, (
+            f"显卡 {gpu_name} (算力 {gpu_cc}) 不被当前 PyTorch 版本支持。\n"
+            f"当前 PyTorch: {torch.__version__}，支持算力: {torch_arches}\n"
+            f"请升级 PyTorch: pip install torch==2.6.0+cu126 "
+            f"--index-url https://download.pytorch.org/whl/cu126"
+        )
+    elif "no kernel image" in last_err.lower():
+        return False, (
+            f"显卡 {gpu_name} (算力 {gpu_cc}) kernel image 缺失。\n"
+            f"当前 PyTorch 编译架构: {torch_arches}\n"
+            f"尝试升级 PyTorch: pip install torch==2.6.0+cu126 "
+            f"--index-url https://download.pytorch.org/whl/cu126"
+        )
+
+    return False, f"唤醒失败(重试{len(delays)}次): {last_err}"
 
 # ================= 线程安全的模型工作者 =================
 class APIModelWorker(threading.Thread):
@@ -129,7 +172,7 @@ class APIModelWorker(threading.Thread):
                 print("⚡ API 微服务: CUDA GPU 已就绪")
             else:
                 preferred_device = torch.device("cpu")
-                print(f"⚠️ API 微服务: GPU 烟雾测试失败 ({gpu_err[:80]})，回退 CPU")
+                print(f"⚠️ API 微服务: GPU 烟雾测试失败 ({gpu_err})，回退 CPU")
         elif use_mps:
             preferred_device = torch.device("mps")
         else:
