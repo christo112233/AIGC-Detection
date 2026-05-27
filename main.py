@@ -29,11 +29,11 @@ except ImportError:
     HAS_PDF = False
 
 from ui_components import (
-    Theme, ThreeDButton, GlowingButton, ModernProgressBar, 
+    Theme, GlowingButton, ModernProgressBar,
     AIGCGaugeWidget, AIGCPieChart, HeatmapBar, DragTextEdit, ResultBlock, StatsDashboard, DetailedHeatmapWindow,
     DeveloperConsole, HistoryWindow, EmptyStateWidget
 )
-from core_engine import AIGCDetectionThread, get_resource_path, check_gpu_availability, load_settings, save_settings, load_history, save_history, clear_all_history
+from core_engine import AIGCDetectionThread, get_resource_path, check_gpu_availability, load_settings, save_settings, load_history, save_history, clear_all_history, get_shared_session
 
 # ================= 跨线程信号桥梁 =================
 class APIMonitor(QObject):
@@ -46,6 +46,22 @@ class HWScannerThread(QThread):
     def run(self):
         has_gpu, msg = check_gpu_availability()
         self.finished_scan.emit(has_gpu, msg)
+
+# ---------------------- 模型预加载线程 ----------------------
+class PreloadThread(QThread):
+    finished_preload = Signal(bool, str)
+
+    def __init__(self, model_path, force_cpu=False):
+        super().__init__()
+        self.mp = model_path
+        self.fc = force_cpu
+
+    def run(self):
+        try:
+            _, _, dt = get_shared_session(self.mp, force_cpu=self.fc)
+            self.finished_preload.emit(True, dt)
+        except Exception as e:
+            self.finished_preload.emit(False, str(e))
 
 # ---------------------- 主程序窗口 ----------------------
 class AIGCSentinel(QMainWindow):
@@ -369,8 +385,17 @@ class AIGCSentinel(QMainWindow):
             self.engine_config.update(dlg.config)
             save_settings(self.engine_config)
 
-            # 如果 force_cpu 切换了，重启 API Worker 使其用新设备
+            # 如果 force_cpu 切换了，重启预加载 + API (共享 session 自动检测并重建)
             if self.engine_config.get('force_cpu', False) != old_force_cpu:
+                self.status_text.setText("切换设备，重新预加载推理引擎...")
+                self.preload_thread = PreloadThread(
+                    self.model_path,
+                    force_cpu=self.engine_config.get('force_cpu', False))
+                self.preload_thread.finished_preload.connect(
+                    lambda ok, info: self.status_text.setText(
+                        f"引擎就绪 ({info})" if ok else f"预加载失败: {info}"))
+                self.preload_thread.start()
+
                 try:
                     from api_server import restart_api_worker
                     restart_api_worker()
@@ -408,6 +433,11 @@ class AIGCSentinel(QMainWindow):
             QMessageBox.warning(self, "状态更新", "仍然未检测到完整模型。")
         self.btn_refresh.setEnabled(True)
 
+    def _on_preload_finished(self, ok, info):
+        self._engine_preloaded = True
+        self.status_text.setText(
+            f"引擎就绪 ({info})" if ok else f"预加载失败: {info}")
+
     def check_model_status(self):
         target_dir = get_resource_path("AIGC_Model")
         if not os.path.exists(target_dir):
@@ -418,24 +448,34 @@ class AIGCSentinel(QMainWindow):
             files = os.listdir(target_dir)
             bg = Theme.get('bg_main')
             has_config = "config.json" in files
-            has_weights = "pytorch_model.bin" in files or "model.safetensors" in files
-            
-            if has_config and has_weights:
+            has_tokenizer = "tokenizer.json" in files
+            has_onnx = "model.onnx" in files
+
+            if has_config and has_tokenizer and has_onnx:
                 self.is_model_valid = True
                 self.model_path = target_dir
                 self.status_icon.setStyleSheet(f"color: {Theme.ACCENT_GREEN.name()}; font-size: 14px;")
                 self.status_text.setText("本地引擎已就绪")
                 self.status_text.setStyleSheet(f"color: {Theme.ACCENT_GREEN.name()}; background-color: {bg}; font-weight: bold; padding: 0 4px;")
                 
-                # --- 核心改动：在确信模型可用后，把跨线程回调挂载给 API 微服务启动函数 ---
+                # 确认模型可用后，后台预加载 ONNX 会话 + 启动 API
+                if not hasattr(self, '_engine_preloaded'):
+                    self.status_text.setText("后台预加载推理引擎...")
+                    self.preload_thread = PreloadThread(
+                        self.model_path,
+                        force_cpu=self.engine_config.get('force_cpu', False))
+                    self.preload_thread.finished_preload.connect(
+                        lambda ok, info: self._on_preload_finished(ok, info))
+                    self.preload_thread.start()
+
                 if not hasattr(self, '_api_started'):
                     try:
                         from api_server import start_api_server
                         start_api_server(
-                            self.model_path, 
-                            self.engine_config, 
-                            port=5005, 
-                            notify_callback=self.api_monitor.heartbeat.emit  # 将 Signal 指针传给 Flask 线程
+                            self.model_path,
+                            self.engine_config,
+                            port=5005,
+                            notify_callback=self.api_monitor.heartbeat.emit
                         )
                         self._api_started = True
                     except Exception as e:
@@ -499,9 +539,34 @@ class AIGCSentinel(QMainWindow):
             if item.widget():
                 item.widget().deleteLater()
                 
-        self.gauge.setValue(0)
         self.progress_bar.setValue(0)
-        
+
+        if hasattr(self, 'work_thread') and self.work_thread is not None:
+            try:
+                self.work_thread.status_signal.disconnect()
+            except Exception:
+                pass
+            try:
+                self.work_thread.progress_signal.disconnect()
+            except Exception:
+                pass
+            try:
+                self.work_thread.result_signal.disconnect()
+            except Exception:
+                pass
+            try:
+                self.work_thread.device_signal.disconnect()
+            except Exception:
+                pass
+            try:
+                self.work_thread.segment_error_signal.disconnect()
+            except Exception:
+                pass
+            try:
+                self.work_thread.finished.disconnect()
+            except Exception:
+                pass
+
         self.work_thread = AIGCDetectionThread(text, self.model_path, config=self.engine_config)
         self.work_thread.status_signal.connect(lambda s: self.status_text.setText(s))
         self.work_thread.progress_signal.connect(self.progress_bar.setValue)
@@ -510,7 +575,8 @@ class AIGCSentinel(QMainWindow):
         self.work_thread.segment_error_signal.connect(
             lambda msg: self.status_text.setText(f"  {msg}"))
         self.work_thread.finished.connect(self._on_thread_finished)
-        self.work_thread.start()
+
+        QTimer.singleShot(400, self.work_thread.start)
 
     def _on_thread_finished(self):
         self.btn_detect.setEnabled(True)
@@ -643,12 +709,12 @@ class AIGCSentinel(QMainWindow):
         
         if show_empty:
             self.show_empty_panel()
-        
+
         while self.result_layout.count() > 0:
             item = self.result_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-                
+
         self.gauge.setValue(0)
         self.progress_bar.setValue(0)
         self.heatmap.set_data([])
@@ -658,8 +724,23 @@ class AIGCSentinel(QMainWindow):
         if self.detailed_heatmap_win:
             self.detailed_heatmap_win.close() 
 
+    def _cleanup_animations(self):
+        """停止并清理所有正在运行的动画"""
+        for anim_attr in ('fade_out_empty', 'fade_in_content',
+                          'fade_out_content', 'fade_in_empty'):
+            anim = getattr(self, anim_attr, None)
+            if anim is not None and anim.state() == QPropertyAnimation.Running:
+                anim.stop()
+                try:
+                    anim.finished.disconnect()
+                except Exception:
+                    pass
+            setattr(self, anim_attr, None)
+
     def show_content_panel(self):
         if not self.content_container.isVisible():
+            self._cleanup_animations()
+
             if hasattr(self.empty_container, 'pause_breathing'):
                 self.empty_container.pause_breathing()
 
@@ -699,6 +780,8 @@ class AIGCSentinel(QMainWindow):
 
     def show_empty_panel(self):
         if self.content_container.isVisible():
+            self._cleanup_animations()
+
             self.content_eff = QGraphicsOpacityEffect()
             self.content_container.setGraphicsEffect(self.content_eff)
 

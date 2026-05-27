@@ -6,11 +6,11 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['onnxruntime', 'onnxruntime.dml', 'onnxruntime.capi.onnxruntime_pybind11_state', 'tokenizers', 'numpy', 'numpy.core._methods', 'numpy.lib.format'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['PySide6.QtWebEngine', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtNetwork', 'PySide6.QtQml', 'PySide6.QtSql', 'PySide6.QtMultimedia', 'PySide6.QtQuick', 'matplotlib', 'tkinter'],
+    excludes=['PySide6.QtWebEngine', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtNetwork', 'PySide6.QtQml', 'PySide6.QtSql', 'PySide6.QtMultimedia', 'PySide6.QtQuick'],
     noarchive=False,
     optimize=0,
 )

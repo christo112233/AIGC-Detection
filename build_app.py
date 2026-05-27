@@ -2,53 +2,113 @@ import os
 import sys
 import shutil
 import subprocess
+import threading
+import time
+
+MODEL_ONLY_FILES = ["model.onnx", "tokenizer.json", "config.json"]
+
+# PyInstaller 构建阶段 -> (进度百分比, 阶段名称)
+BUILD_STAGES = [
+    ("Analyzing", 15, "分析依赖"),
+    ("Building PKG", 40, "打包资源"),
+    ("Building EXE", 60, "生成可执行文件"),
+    ("Building COLLECT", 80, "收集文件"),
+    ("copying", 90, "复制依赖"),
+]
+
+class ProgressBar:
+    """简易控制台进度条"""
+    def __init__(self, total=100, width=40):
+        self.total = total
+        self.width = width
+        self.current = 0
+        self.lock = threading.Lock()
+
+    def update(self, value):
+        with self.lock:
+            self.current = min(value, self.total)
+            self._draw()
+
+    def set_status(self, text):
+        with self.lock:
+            bar = self._bar_str()
+            print(f"\r{bar} {self.current:3d}% | {text:<30s}", end="", flush=True)
+
+    def _bar_str(self):
+        filled = int(self.width * self.current / self.total)
+        bar = "█" * filled + "░" * (self.width - filled)
+        return f"[{bar}]"
+
+    def _draw(self):
+        bar = self._bar_str()
+        print(f"\r{bar} {self.current:3d}%", end="", flush=True)
+
+    def finish(self, text=""):
+        with self.lock:
+            self.current = 100
+            bar = self._bar_str()
+            print(f"\r{bar} 100% | {text:<30s}")
+
+    def start(self):
+        self.update(0)
+
+
+def _read_output(stream, progress, stop_event):
+    """在后台线程中读取 PyInstaller 输出并更新进度"""
+    for line in iter(stream.readline, b""):
+        if stop_event.is_set():
+            break
+        text = line.decode("utf-8", errors="ignore").strip()
+        if not text:
+            continue
+        # 匹配已知构建阶段
+        for keyword, pct, name in BUILD_STAGES:
+            if keyword in text:
+                progress.update(pct)
+                progress.set_status(name)
+                break
+    stream.close()
+
 
 def main():
-    print("🚀 准备开始构建")
-    
-    # 1. 检查必要环境
-    try:
-        import PyInstaller
-    except ImportError:
-        print("❌ 未检测到 PyInstaller，正在为您自动安装...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
-        print("✅ PyInstaller 安装完成！")
+    print("=" * 55)
+    print("  DeepVeri 构建脚本")
+    print("=" * 55)
 
-    # 2. 定义路径与参数
+    try:
+        import PyInstaller  # noqa: F401
+    except ImportError:
+        print("未检测到 PyInstaller，正在安装...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
+
     app_name = "DeepVeri"
     main_script = "main.py"
     model_folder = "AIGC_Model"
     icon_file = "logo.ico"
-    
+
     if not os.path.exists(main_script):
-        print(f"❌ 找不到主程序入口: {main_script}")
+        print(f"找不到主程序: {main_script}")
         return
 
     if not os.path.exists(model_folder):
-        print(f"❌ 找不到模型文件夹: {model_folder}，请确保它存在于当前目录。")
+        print(f"找不到模型文件夹: {model_folder}")
         return
 
-    print("\n📦 正在调用 PyInstaller 进行深度编译...")
-    
-    # PyInstaller 构建命令列表基础部分
-    pyinstaller_args = [
-        "pyinstaller",
-        "--noconfirm",          
-        "--onedir",             
-        "--windowed",           
-        f"--name={app_name}"    
-    ]
-    
-    # 动态检测并添加程序图标
-    if os.path.exists(icon_file):
-        pyinstaller_args.append(f"--icon={icon_file}")
-        print(f"🎨 已检测到图标文件 {icon_file}，将为程序注入专属图标！")
-    else:
-        print(f"⚠️ 未检测到 {icon_file}，将使用系统默认图标。")
+    print("\n调用 PyInstaller 打包...\n")
 
-    # 追加排除模块和主程序脚本
-    pyinstaller_args.extend([
-        #剔除 PySide6 未使用的庞大组件 ---
+    pyinstaller_args = [
+        sys.executable, "-m", "PyInstaller",
+        "--noconfirm",
+        "--onedir",
+        "--windowed",
+        f"--name={app_name}",
+        "--hidden-import=onnxruntime",
+        "--hidden-import=onnxruntime.dml",
+        "--hidden-import=onnxruntime.capi.onnxruntime_pybind11_state",
+        "--hidden-import=tokenizers",
+        "--hidden-import=numpy",
+        "--hidden-import=numpy.core._methods",
+        "--hidden-import=numpy.lib.format",
         "--exclude-module=PySide6.QtWebEngine",
         "--exclude-module=PySide6.QtWebEngineCore",
         "--exclude-module=PySide6.QtWebEngineWidgets",
@@ -57,43 +117,54 @@ def main():
         "--exclude-module=PySide6.QtSql",
         "--exclude-module=PySide6.QtMultimedia",
         "--exclude-module=PySide6.QtQuick",
-        "--exclude-module=matplotlib",
-        "--exclude-module=tkinter",
-        
-        main_script
-    ])
+    ]
 
-    # 3. 执行打包过程
-    try:
-        subprocess.check_call(pyinstaller_args)
-        print("\n✅ 代码编译完成！")
-    except subprocess.CalledProcessError as e:
-        print(f"\n❌ 打包过程发生错误: {e}")
+    if os.path.exists(icon_file):
+        pyinstaller_args.append(f"--icon={icon_file}")
+
+    pyinstaller_args.append(main_script)
+
+    progress = ProgressBar()
+    progress.start()
+    progress.set_status("启动 PyInstaller...")
+
+    process = subprocess.Popen(
+        pyinstaller_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    stop_event = threading.Event()
+    reader_thread = threading.Thread(
+        target=_read_output, args=(process.stdout, progress, stop_event),
+        daemon=True,
+    )
+    reader_thread.start()
+
+    returncode = process.wait()
+    stop_event.set()
+    reader_thread.join(timeout=2)
+
+    if returncode != 0:
+        progress.finish("打包失败")
+        print(f"\n退出码: {returncode}")
         return
+
+    progress.update(92)
+    progress.set_status("复制模型文件...")
 
     dist_dir = os.path.join("dist", app_name)
-    target_model_dir = os.path.join(dist_dir, model_folder)
+    target_dir = os.path.join(dist_dir, model_folder)
+    os.makedirs(target_dir, exist_ok=True)
 
-    print(f"\n🚚 正在将庞大的 AI 模型挂载到发布版本中 (可能需要几秒钟)...")
-    
-    if os.path.exists(target_model_dir):
-        print("清理旧的模型文件夹...")
-        shutil.rmtree(target_model_dir)
-        
-    try:
-        shutil.copytree(model_folder, target_model_dir)
-        print("✅ 模型文件夹拷贝成功！")
-    except Exception as e:
-        print(f"❌ 模型拷贝失败: {e}")
-        return
+    for fname in MODEL_ONLY_FILES:
+        src = os.path.join(model_folder, fname)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(target_dir, fname))
 
-    # 5. 完成提示
-    print("\n" + "="*50)
-    print(f"🎉 打包大功告成！")
-    print(f"📁 您的成品软件已输出至: {os.path.abspath(dist_dir)}")
-    print(f"💡 发送给别人时，请将整个 【{app_name}】 文件夹打包成 ZIP 发送。")
-    print(f"▶️ 用户解压后，双击里面的 【{app_name}.exe】 即可直接使用！")
-    print("="*50 + "\n")
+    progress.finish("构建完成")
+    print(f"\n输出目录: {os.path.abspath(dist_dir)}")
+    print(f"将整个 [{app_name}] 文件夹压缩发送即可")
 
 if __name__ == "__main__":
     main()
